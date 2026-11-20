@@ -4,7 +4,7 @@ import { Facts, PageHeader } from '../components/ui.jsx';
 import { OUR_IDS } from '../data/sample.js';
 
 export default function Settings() {
-  const { state, dispatch, notify } = useStore();
+  const { state, dispatch, notify, actions } = useStore();
   const [form, setForm] = useState({ companyName: state.settings.companyName, notifyEmail: state.settings.notifyEmail, retentionDays: state.settings.retentionDays });
   const [confirmReset, setConfirmReset] = useState(false);
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
@@ -33,12 +33,12 @@ export default function Settings() {
 
       <section className="card card-pad" style={{ maxWidth: 760 }}>
         <h2>Sample data</h2>
-        <div className="muted">Everything you change is saved in this browser only. Resetting puts back the original sample partners, files and mappings.</div>
+        <div className="muted">Everything is saved by the server in data/db.json. Resetting puts back the original sample partners, files and mappings. Files in the inbox folders aren’t touched.</div>
         <div className="actions">
           {confirmReset ? (
             <>
               <span style={{ alignSelf: 'center', fontSize: 13 }}>Reset everything to the sample data?</span>
-              <button type="button" className="btn btn-danger" onClick={() => { dispatch({ type: 'reset' }); setConfirmReset(false); notify('Sample data restored.'); }}>Yes, reset</button>
+              <button type="button" className="btn btn-danger" onClick={async () => { setConfirmReset(false); try { await actions.reset(); notify('Sample data restored.'); } catch (err) { notify(err.message, 'bad'); } }}>Yes, reset</button>
               <button type="button" className="btn" onClick={() => setConfirmReset(false)}>Cancel</button>
             </>
           ) : (

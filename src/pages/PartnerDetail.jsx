@@ -8,7 +8,7 @@ const STAGES = ['Not started', 'Testing', 'Live'];
 
 export default function PartnerDetail() {
   const { id } = useParams();
-  const { state, dispatch, notify } = useStore();
+  const { state, dispatch, notify, actions } = useStore();
   const navigate = useNavigate();
   const [tab, setTab] = useState('overview');
   const [newSet, setNewSet] = useState({ set: '214', dir: 'out' });
@@ -26,9 +26,13 @@ export default function PartnerDetail() {
     ? [['Their AS2 URL', c.host], ['Their AS2 ID', c.username], ['Certificate', c.auth], ['Allowed IPs', c.allowedIps.join(', ')], ['Receipts (MDN)', 'Synchronous, signed']]
     : [['Host', c.host], ['Username', c.username], ['Sign-in', c.auth], ['Allowed IPs', c.allowedIps.join(', ') || 'Any (not restricted)'], ['Folders', `${c.inbound}  ${c.outbound}`]];
 
-  const sendTest = () => {
-    dispatch({ type: 'sendTest', partnerId: partner.id });
-    notify('Test file sent. Switch to Test to see it in Transactions.');
+  const sendTest = async () => {
+    try {
+      await actions.sendTest(partner.id);
+      notify(`Test file written to ${partner.id}/outbound. Switch to Test to see it in Transactions.`);
+    } catch (err) {
+      notify(err.message, 'bad');
+    }
   };
 
   const addSet = () => {

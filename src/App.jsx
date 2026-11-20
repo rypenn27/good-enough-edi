@@ -24,7 +24,7 @@ const NAV = [
 ];
 
 export default function App() {
-  const { state, dispatch, toast } = useStore();
+  const { state, dispatch, toast, offline } = useStore();
   const alertCount = useAlerts().length;
 
   return (
@@ -50,6 +50,7 @@ export default function App() {
       </nav>
 
       <main className="main">
+        {offline && <div className="offline-banner" role="alert">Lost contact with the server. Changes won’t save until it’s back; this page reconnects on its own.</div>}
         {state.env === 'test' && <div className="test-banner">You’re viewing the Test environment. Nothing here reaches partners’ production systems.</div>}
         <Routes>
           <Route path="/" element={<Transactions />} />

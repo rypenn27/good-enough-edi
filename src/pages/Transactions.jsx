@@ -8,7 +8,7 @@ const RANGES = { all: 'All time', '1h': 'Last hour', '24h': 'Last 24 hours', '7d
 const RANGE_MS = { '1h': 3600e3, '24h': 86400e3, '7d': 7 * 86400e3 };
 
 export default function Transactions() {
-  const { state, uploadFile, notify } = useStore();
+  const { state, actions, notify } = useStore();
   const navigate = useNavigate();
   const [f, setF] = useState({ q: '', partner: '', set: '', dir: '', status: '', range: 'all' });
   const [uploading, setUploading] = useState(false);
@@ -103,12 +103,12 @@ export default function Transactions() {
       {uploading && (
         <UploadModal
           onClose={() => setUploading(false)}
-          onSubmit={(raw) => {
-            const res = uploadFile(raw);
+          onSubmit={async (raw) => {
+            const res = await actions.uploadFile(raw);
             if (res.error) return res.error;
             setUploading(false);
-            notify(res.tx.errors.length ? `File received, but it failed validation (${res.tx.errors.length} problems).` : 'File received and delivered to the TMS.', res.tx.errors.length ? 'bad' : 'ok');
-            navigate(`/transactions/${res.tx.id}`);
+            notify(res.errors ? `File received, but it failed validation (${res.errors} problems). A rejecting 997 was sent.` : 'File received and delivered to the TMS. A 997 was sent.', res.errors ? 'bad' : 'ok');
+            navigate(`/transactions/${res.txId}`);
             return null;
           }}
         />
@@ -142,11 +142,11 @@ function UploadModal({ onClose, onSubmit }) {
       footer={
         <>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="button" className="btn btn-primary" disabled={!raw.trim()} onClick={() => setError(onSubmit(raw))}>Process file</button>
+          <button type="button" className="btn btn-primary" disabled={!raw.trim()} onClick={async () => setError(await onSubmit(raw))}>Process file</button>
         </>
       }
     >
-      <p className="muted" style={{ margin: 0 }}>Choose an X12 file or paste its contents. It’s matched to a partner by the sender ID in the ISA segment, then checked against that partner’s guideline.</p>
+      <p className="muted" style={{ margin: 0 }}>Choose an X12 file or paste its contents. It’s matched to a partner by the sender ID in the ISA segment, then checked against that partner’s guideline. You can also drop files into a partner’s inbound folder (see Connections).</p>
       <div className="actions">
         <button type="button" className="btn" onClick={() => fileRef.current?.click()}>Choose file</button>
         <button type="button" className="btn btn-ghost" onClick={useSample}>Paste a sample 204</button>

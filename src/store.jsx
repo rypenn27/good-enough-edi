@@ -1,87 +1,37 @@
-// App state: one reducer, saved to this browser's localStorage so changes survive a reload.
-import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useState } from 'react';
-import { partners, guidelines, mappings, sampleTransactions, sampleSettings, makeTransaction, OUR_IDS } from './data/sample.js';
-import { envelope, parseX12, validate } from './lib/x12.js';
+// App state comes from the API server (server/index.js). Transactions change only on the
+// server; partner, mapping and settings edits apply here at once and are saved shortly after.
+import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
-const STORAGE_KEY = 'good-enough-edi:v1';
+const ENV_KEY = 'good-enough-edi:env';
+const POLL_MS = 2000;
+const SAVE_DELAY_MS = 400;
+const CONFIG_ACTIONS = new Set(['addPartner', 'updatePartner', 'updateMapping', 'updateSettings']);
 
-export function guidelineFor(state, partner, set, dir) {
-  const link = partner?.sets.find((s) => s.set === set && s.dir === dir);
-  return state.guidelines.find((g) => g.id === link?.guideline);
-}
-
-// Inbound files are checked against the partner's guideline; a failure also means a rejecting 997.
-function check(state, tx) {
-  if (tx.dir !== 'in' || tx.status === 'resolved') return tx;
-  const partner = state.partners.find((p) => p.id === tx.partnerId);
-  const errors = validate(parseX12(tx.raw), guidelineFor(state, partner, tx.set, 'in'));
-  if (!errors.length) return { ...tx, errors };
-  const hasEvent = tx.events.some((e) => e.text.startsWith('997 rejection'));
-  const events = hasEvent
-    ? tx.events
-    : [...tx.events, { at: tx.time, text: `${errors.length} problem${errors.length > 1 ? 's' : ''} found` }, { at: tx.time, text: '997 rejection sent to partner' }, { at: tx.time, text: 'Alert emailed to the EDI team' }];
-  return { ...tx, errors, status: 'failed', ack: 'Rejected', events };
-}
-
-function initialState() {
-  const base = { env: 'production', partners, guidelines, mappings, settings: sampleSettings, transactions: [] };
-  base.transactions = sampleTransactions().map((tx) => check(base, tx));
-  return base;
-}
-
-function loadState() {
+function savedEnv() {
   try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) return JSON.parse(saved);
+    return localStorage.getItem(ENV_KEY) || 'production';
   } catch {
-    // Storage blocked or corrupt: fall back to sample data.
+    return 'production';
   }
-  return initialState();
 }
 
-const now = () => new Date().toISOString();
-const nextControl = (txs) => String(Math.max(...txs.map((t) => Number(t.control)), 0) + 1).padStart(9, '0');
-
-function updateTx(state, id, fn) {
-  return { ...state, transactions: state.transactions.map((t) => (t.id === id ? fn(t) : t)) };
+async function api(path, { method = 'GET', body } = {}) {
+  const res = await fetch(`/api${path}`, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body && JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `The server answered ${res.status}.`);
+  return data;
 }
 
 function reducer(state, action) {
   switch (action.type) {
+    case 'load':
+      return { ...action.data, env: state?.env ?? savedEnv() };
     case 'setEnv':
       return { ...state, env: action.env };
-
-    case 'upload': {
-      return { ...state, transactions: [action.tx, ...state.transactions] };
-    }
-
-    case 'reprocess':
-      return updateTx(state, action.id, (t) => {
-        const fresh = check(state, { ...t, status: 'delivered', ack: 'Sent', events: [...t.events, { at: now(), text: 'Reprocessed' }] });
-        return fresh.errors.length ? fresh : { ...fresh, events: [...fresh.events, { at: now(), text: 'Delivered to TMS' }] };
-      });
-
-    case 'resolve':
-      return updateTx(state, action.id, (t) => ({ ...t, status: 'resolved', events: [...t.events, { at: now(), text: 'Marked resolved' }] }));
-
-    case 'resend':
-      return updateTx(state, action.id, (t) => ({ ...t, status: 'awaiting997', ack: 'Pending', events: [...t.events, { at: now(), text: 'Sent again' }] }));
-
-    case 'sendTest': {
-      const partner = state.partners.find((p) => p.id === action.partnerId);
-      const out = partner.sets.find((s) => s.dir === 'out') || { set: '997' };
-      const fields = { '204': null, '990': { shipmentId: 'TEST', action: 'A' }, '214': { shipmentId: 'TEST', status: 'X3', city: 'Akron', state: 'OH' }, '210': { invoice: 'TEST', shipmentId: 'TEST', amount: 100 } }[out.set];
-      if (!fields) return state;
-      const tx = makeTransaction({ env: 'test', dir: 'out', partner, set: out.set, control: nextControl(state.transactions), ref: `Test ${out.set}`, status: 'awaiting997', fields });
-      return { ...state, transactions: [tx, ...state.transactions] };
-    }
-
     case 'addPartner':
       return { ...state, partners: [...state.partners, action.partner] };
-
     case 'updatePartner':
       return { ...state, partners: state.partners.map((p) => (p.id === action.id ? action.fn(p) : p)) };
-
     case 'updateMapping':
       return {
         ...state,
@@ -93,13 +43,8 @@ function reducer(state, action) {
           return next;
         }),
       };
-
     case 'updateSettings':
       return { ...state, settings: { ...state.settings, ...action.patch } };
-
-    case 'reset':
-      return initialState();
-
     default:
       return state;
   }
@@ -108,58 +53,122 @@ function reducer(state, action) {
 const StoreContext = createContext(null);
 
 export function StoreProvider({ children }) {
-  const [state, dispatch] = useReducer(reducer, undefined, loadState);
+  const [state, baseDispatch] = useReducer(reducer, null);
+  const [offline, setOffline] = useState(false);
   const [toast, setToast] = useState(null);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch {
-      // Not saved; the app still works for this visit.
-    }
-  }, [state]);
-
-  useEffect(() => {
-    if (!toast) return undefined;
-    const t = setTimeout(() => setToast(null), 3500);
-    return () => clearTimeout(t);
-  }, [toast]);
+  const version = useRef(0);
+  const seenIds = useRef(null);
+  const dirty = useRef(false);
+  const saving = useRef(null);
+  const saveTimer = useRef(null);
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   const notify = useCallback((text, tone = 'ok') => setToast({ text, tone, key: Date.now() }), []);
 
-  // Reads an uploaded or pasted file, finds the partner by sender ID and checks it.
-  const uploadFile = useCallback(
-    (raw) => {
-      const segments = parseX12(raw);
-      const env = envelope(segments);
-      if (!segments.length || segments[0].id !== 'ISA') return { error: 'This doesn’t look like an X12 file. It should start with an ISA segment.' };
-      const partner = state.partners.find((p) => p.isaId === env.senderId || p.testIsaId === env.senderId);
-      if (!partner) return { error: `No trading partner has the sender ID "${env.senderId}". Add the partner first, or check the ISA-06 value.` };
-      if (![OUR_IDS.id, OUR_IDS.testId].includes(env.receiverId)) return { error: `This file is addressed to "${env.receiverId}", not to your ID ${OUR_IDS.id}.` };
-      const isTest = env.usage === 'T' || env.senderId === partner.testIsaId;
-      let tx = {
-        id: `tx-up-${Date.now()}`, time: now(), env: isTest ? 'test' : 'production', dir: 'in', partnerId: partner.id,
-        set: env.set, control: env.control, ref: 'Uploaded file', status: 'delivered', ack: 'Sent', via: 'Upload', raw, fields: null,
-        events: [{ at: now(), text: 'File uploaded by hand' }, { at: now(), text: `Matched to partner ${partner.name}` }, { at: now(), text: 'Checked against guideline' }],
-        errors: [],
-      };
-      tx = check(state, tx);
-      if (!tx.errors.length) tx.events.push({ at: now(), text: 'Delivered to TMS' }, { at: now(), text: '997 acceptance sent to partner' });
-      dispatch({ type: 'upload', tx });
-      return { tx };
-    },
-    [state],
-  );
+  const refresh = useCallback(async () => {
+    const data = await api('/state');
+    version.current = data.version;
+    // Point out files that arrived through the inbox folders since the last look.
+    if (seenIds.current) {
+      const fresh = data.transactions.filter((t) => !seenIds.current.has(t.id) && t.via === 'Folder' && t.dir === 'in');
+      if (fresh.length) {
+        const bad = fresh.filter((t) => t.errors.length).length;
+        notify(`${fresh.length} new file${fresh.length > 1 ? 's' : ''} from the inbox${bad ? `, ${bad} failed validation` : ''}.`, bad ? 'bad' : 'ok');
+      }
+    }
+    seenIds.current = new Set(data.transactions.map((t) => t.id));
+    baseDispatch({ type: 'load', data });
+    setOffline(false);
+  }, [notify]);
 
-  const value = useMemo(() => ({ state, dispatch, toast, notify, uploadFile }), [state, toast, notify, uploadFile]);
+  const saveConfig = useCallback(async () => {
+    clearTimeout(saveTimer.current);
+    if (!dirty.current) return saving.current;
+    dirty.current = false;
+    const { partners, guidelines, mappings, settings } = stateRef.current;
+    saving.current = api('/config', { method: 'PUT', body: { partners, guidelines, mappings, settings } })
+      .then((r) => { version.current = r.version; })
+      .catch(() => { dirty.current = true; setOffline(true); })
+      .finally(() => { saving.current = null; });
+    return saving.current;
+  }, []);
+
+  const dispatch = useCallback((action) => {
+    baseDispatch(action);
+    if (action.type === 'setEnv') {
+      try { localStorage.setItem(ENV_KEY, action.env); } catch { /* not remembered; fine */ }
+    }
+    if (CONFIG_ACTIONS.has(action.type)) {
+      dirty.current = true;
+      clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(saveConfig, SAVE_DELAY_MS);
+    }
+  }, [saveConfig]);
+
+  useEffect(() => {
+    refresh().catch(() => setOffline(true));
+    const poll = setInterval(async () => {
+      if (dirty.current || saving.current) return; // don't overwrite edits that haven't saved yet
+      try {
+        const r = await api('/version');
+        if (r.version !== version.current) await refresh();
+        else setOffline(false);
+      } catch {
+        setOffline(true);
+      }
+    }, POLL_MS);
+    return () => clearInterval(poll);
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const t = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  // Server actions save any pending edits first, then reload the latest data.
+  const run = useCallback(async (path, body) => {
+    await saveConfig();
+    const result = await api(path, { method: 'POST', body });
+    await refresh();
+    return result;
+  }, [saveConfig, refresh]);
+
+  const actions = useMemo(() => ({
+    reprocess: (id) => run(`/transactions/${id}/reprocess`),
+    resolve: (id) => run(`/transactions/${id}/resolve`),
+    resend: (id) => run(`/transactions/${id}/resend`),
+    sendTest: (partnerId) => run(`/partners/${partnerId}/send-test`),
+    reset: () => run('/reset'),
+    uploadFile: async (raw) => {
+      try {
+        return await run('/upload', { raw });
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+  }), [run]);
+
+  const value = useMemo(() => ({ state, dispatch, toast, notify, actions, offline }), [state, dispatch, toast, notify, actions, offline]);
+
+  if (!state) {
+    return (
+      <div className="boot">
+        {offline ? (
+          <>
+            <h1>Can’t reach the Good Enough EDI server</h1>
+            <p>Start it with <code className="mono">npm run dev</code> in the project folder. This page will connect on its own once it’s running.</p>
+          </>
+        ) : (
+          <p>Loading…</p>
+        )}
+      </div>
+    );
+  }
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }
 
 export function useStore() {
   return useContext(StoreContext);
-}
-
-export function usePartner(id) {
-  const { state } = useStore();
-  return state.partners.find((p) => p.id === id);
 }

@@ -6,7 +6,7 @@ import { SEGMENT_NAMES, SET_NAMES, elementLabel, envelope, parseX12, runMapping 
 
 export default function TransactionDetail() {
   const { id } = useParams();
-  const { state, dispatch, notify } = useStore();
+  const { state, actions, notify } = useStore();
   const [tab, setTab] = useState('raw');
   const tx = state.transactions.find((t) => t.id === id);
   const partner = state.partners.find((p) => p.id === tx?.partnerId);
@@ -27,10 +27,16 @@ export default function TransactionDetail() {
     URL.revokeObjectURL(url);
   };
 
-  const reprocess = () => {
-    dispatch({ type: 'reprocess', id: tx.id });
-    notify(tx.errors.length ? 'Reprocessed. Fix the file or the guideline if it fails again.' : 'Reprocessed and delivered to the TMS.');
+  // Runs a server action and reports the outcome.
+  const act = async (fn, message) => {
+    try {
+      const r = await fn(tx.id);
+      notify(typeof message === 'function' ? message(r) : message);
+    } catch (err) {
+      notify(err.message, 'bad');
+    }
   };
+  const reprocess = () => act(actions.reprocess, (r) => (r.errors ? `Still failing: ${r.errors} problem${r.errors > 1 ? 's' : ''}. Fix the file or the guideline.` : 'Reprocessed and delivered to the TMS.'));
 
   return (
     <>
@@ -48,12 +54,12 @@ export default function TransactionDetail() {
           <>
             <button type="button" className="btn" onClick={download}>Download file</button>
             {(tx.status === 'failed' || tx.status === 'rejected') && (
-              <button type="button" className="btn" onClick={() => { dispatch({ type: 'resolve', id: tx.id }); notify('Marked resolved.'); }}>Mark resolved</button>
+              <button type="button" className="btn" onClick={() => act(actions.resolve, 'Marked resolved.')}>Mark resolved</button>
             )}
             {tx.dir === 'in' ? (
               <button type="button" className="btn btn-primary" onClick={reprocess}>Reprocess</button>
             ) : (
-              <button type="button" className="btn btn-primary" onClick={() => { dispatch({ type: 'resend', id: tx.id }); notify('Sent again. Waiting on the partner’s 997.'); }}>Send again</button>
+              <button type="button" className="btn btn-primary" onClick={() => act(actions.resend, `Sent again to ${partner?.id}/outbound. Waiting on the partner’s 997.`)}>Send again</button>
             )}
           </>
         }

@@ -11,7 +11,23 @@ export default function Connections() {
     <>
       <PageHeader title="Connections" subtitle="How files move between you and each partner." />
 
-      <div className="notice">The servers below aren’t connected yet. This is the front end only; SFTP will run on SFTPGo and AS2 on OpenAS2 once the backend is built.</div>
+      <section className="card card-pad">
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}><h2>Local inbox</h2><Pill status="Healthy">Watching</Pill></div>
+        <div className="muted">Stands in for SFTP until SFTPGo is set up. Drop an X12 file into a partner’s <b>inbound</b> folder and it’s picked up within a few seconds. The 997 reply lands in their <b>outbound</b> folder.</div>
+        <code className="mono" style={{ padding: '9px 12px', background: 'var(--bg)', borderRadius: 6, overflowWrap: 'anywhere' }}>{state.inboxPath}</code>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Partner</th><th>Drop files in</th><th>Replies appear in</th></tr></thead>
+            <tbody>
+              {state.partners.map((p) => (
+                <tr key={p.id}><td>{p.name}</td><td className="mono">{p.id}\inbound</td><td className="mono">{p.id}\outbound</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div className="notice">The SFTP server and AS2 station below aren’t running yet. SFTP will use SFTPGo and AS2 will use OpenAS2, writing into the same inbox folders.</div>
 
       <div className="cols">
         <section className="card card-pad col-half">

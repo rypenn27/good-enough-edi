@@ -18,6 +18,9 @@ export function useAlerts() {
       alerts.push({ tone: 'warn', at: t.time, title: `No 997 from ${name(t.partnerId)} after ${WAIT_LIMIT_MIN} minutes${env}`, detail: `${t.set} ${t.ref}`, to: `/transactions/${t.id}` });
     }
   });
+  (state.inboxErrors || []).forEach((e) => {
+    alerts.push({ tone: 'bad', at: e.at, title: `Couldn’t read ${e.file} from ${name(e.partnerId)}’s folder`, detail: `${e.error} The file was moved to ${e.partnerId}\\error.`, to: `/partners/${e.partnerId}` });
+  });
   state.partners.filter((p) => !p.connection.healthy).forEach((p) => {
     alerts.push({ tone: 'warn', at: null, title: `${p.name}’s connection isn’t working yet`, detail: p.connection.auth, to: `/partners/${p.id}` });
   });
