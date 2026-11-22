@@ -2,7 +2,15 @@ import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useStore } from '../store.jsx';
 import { Facts, PageHeader, Pill, Tabs, fmtDateTime, fmtTime } from '../components/ui.jsx';
-import { SEGMENT_NAMES, SET_NAMES, elementLabel, envelope, parseX12, runMapping } from '../lib/x12.js';
+import { SEGMENT_NAMES, SET_NAMES, buildX12, elementLabel, envelope, parseX12, runMapping } from '../lib/x12.js';
+
+// Saves text as a file in the browser's downloads.
+function saveFile(name, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: name });
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 export default function TransactionDetail() {
   const { id } = useParams();
@@ -20,11 +28,20 @@ export default function TransactionDetail() {
   const ctx = { partnerName: (isaId) => state.partners.find((p) => p.isaId === isaId || p.testIsaId === isaId)?.name };
   const json = mapping ? runMapping(segments, mapping.rules, ctx).output : tx.fields || { note: 'No mapping for this partner and transaction set yet.' };
 
-  const download = () => {
-    const url = URL.createObjectURL(new Blob([tx.raw], { type: 'text/plain' }));
-    const a = Object.assign(document.createElement('a'), { href: url, download: `${tx.set}_${tx.control}.edi` });
-    a.click();
-    URL.revokeObjectURL(url);
+  const download = () => saveFile(`${tx.set}_${tx.control}.edi`, tx.raw);
+
+  // For testing: the 997 this partner would send back for this file. Upload it to the
+  // partner's inbound folder (over SFTP or by copying) to see the file get acknowledged.
+  const canFake997 = tx.dir === 'out' && tx.set !== '997' && tx.status === 'awaiting997';
+  const partner997 = (accepted) => {
+    const control = String(Math.floor(Math.random() * 1e9)).padStart(9, '0');
+    const raw = buildX12({
+      set: '997', control, date: new Date(), usage: env.usage || 'P',
+      senderId: env.receiverId, receiverId: env.senderId,
+      fields: { ackSet: tx.set, ackControl: env.group || tx.control, accepted },
+    });
+    saveFile(`${partner?.id}-997-for-${tx.set}_${tx.control}.edi`, raw);
+    notify(`Saved. Upload it to ${partner?.id}/inbound to play the partner answering.`);
   };
 
   // Runs a server action and reports the outcome.
@@ -36,7 +53,7 @@ export default function TransactionDetail() {
       notify(err.message, 'bad');
     }
   };
-  const reprocess = () => act(actions.reprocess, (r) => (r.errors ? `Still failing: ${r.errors} problem${r.errors > 1 ? 's' : ''}. Fix the file or the guideline.` : 'Reprocessed and delivered to the TMS.'));
+  const reprocess = () => act(actions.reprocess, (r) => (r.errors ? `Still failing: ${r.errors} problem${r.errors > 1 ? 's' : ''}. Fix the file or the guideline.` : 'Reprocessed. Sending it to the TMS now.'));
 
   return (
     <>
@@ -53,6 +70,12 @@ export default function TransactionDetail() {
         actions={
           <>
             <button type="button" className="btn" onClick={download}>Download file</button>
+            {canFake997 && (
+              <>
+                <button type="button" className="btn" onClick={() => partner997(true)} title="For testing: the 997 the partner would send back">Partner’s 997: accept</button>
+                <button type="button" className="btn" onClick={() => partner997(false)} title="For testing: a 997 rejecting this file">Partner’s 997: reject</button>
+              </>
+            )}
             {(tx.status === 'failed' || tx.status === 'rejected') && (
               <button type="button" className="btn" onClick={() => act(actions.resolve, 'Marked resolved.')}>Mark resolved</button>
             )}

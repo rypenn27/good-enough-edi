@@ -3,7 +3,7 @@
 //   edi-inbox/<partner id>/outbound  997s and other files "sent" to the partner
 //   edi-inbox/<partner id>/archive   processed files
 //   edi-inbox/<partner id>/error     files that couldn't be read, with a .txt saying why
-// Later, SFTPGo's partner home folders can point at these same folders.
+// SFTPGo's partner home folders point at these same folders, so SFTP uploads land here.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,9 +27,28 @@ export function deliver(partner, tx) {
   fs.writeFileSync(path.join(INBOX, partner.id, 'outbound', `${tx.set}_${tx.control}.edi`), tx.raw);
 }
 
-// Looks in every partner's inbound folder once. Returns true if anything changed.
+// Keeps our control-number counter ahead of every number already used, in the database or
+// in any outbound folder. Without this, a reset could reuse numbers and overwrite files.
+export function syncControl(db) {
+  let max = Number(db.lastControl) || 0;
+  for (const t of db.transactions) if (t.dir === 'out') max = Math.max(max, Number(t.control) || 0);
+  for (const p of db.partners) {
+    const out = path.join(INBOX, p.id, 'outbound');
+    if (!fs.existsSync(out)) continue;
+    for (const name of fs.readdirSync(out)) {
+      const m = /^\d{3}_(\d{9})\.edi$/.exec(name);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+  }
+  const changed = max !== db.lastControl;
+  db.lastControl = max;
+  return changed;
+}
+
+// Looks in every partner's inbound folder once. Returns the results of every file it
+// handled (empty if nothing changed).
 export function scan(db, log = console.log) {
-  let changed = false;
+  const handled = [];
   for (const partner of db.partners) {
     const inbound = path.join(INBOX, partner.id, 'inbound');
     if (!fs.existsSync(inbound)) continue;
@@ -52,7 +71,7 @@ export function scan(db, log = console.log) {
       }
 
       const result = processInbound(db, fs.readFileSync(archived, 'utf8'), { via: 'Folder', partner, fileName: name });
-      changed = true;
+      handled.push(result);
       if (result.error) {
         const errPath = path.join(INBOX, partner.id, 'error', path.basename(archived));
         fs.renameSync(archived, errPath);
@@ -63,8 +82,8 @@ export function scan(db, log = console.log) {
       }
       if (result.ack) deliver(result.partner, result.ack);
       const { tx } = result;
-      log(`${tx.errors.length ? '✗' : '✓'} ${partner.id}/${name}: ${tx.set} ${tx.control}${tx.errors.length ? `, ${tx.errors.length} problems` : ''}${result.ack ? `, 997 ${result.ack.control} written` : ''}`);
+      log(`${tx.errors.length ? '✗' : '✓'} ${partner.id}/${name}: ${tx.set} ${tx.control}${tx.errors.length ? `, ${tx.errors.length} problems` : ''}${result.ack ? `, 997 ${result.ack.control} written` : ''}${result.acked ? `, acknowledges ${result.acked.set} ${result.acked.control}` : ''}`);
     }
   }
-  return changed;
+  return handled;
 }

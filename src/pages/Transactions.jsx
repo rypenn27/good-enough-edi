@@ -42,7 +42,7 @@ export default function Transactions() {
         <div className="card kpi"><span>Received</span><strong>{count((t) => t.dir === 'in')}</strong></div>
         <div className="card kpi"><span>Sent</span><strong>{count((t) => t.dir === 'out')}</strong></div>
         <div className="card kpi warn"><span>Waiting on 997</span><strong>{count((t) => t.status === 'awaiting997')}</strong></div>
-        <div className="card kpi bad"><span>Failed or rejected</span><strong>{count((t) => t.status === 'failed' || t.status === 'rejected')}</strong></div>
+        <div className="card kpi bad"><span>Failed or rejected</span><strong>{count((t) => t.status === 'failed' || t.status === 'rejected' || t.status === 'tmsFailed')}</strong></div>
       </div>
 
       <section className="card">
@@ -68,7 +68,7 @@ export default function Transactions() {
           <label htmlFor="tx-status" className="sr-only">Status</label>
           <select id="tx-status" value={f.status} onChange={set('status')}>
             <option value="">All statuses</option>
-            {['delivered', 'acknowledged', 'awaiting997', 'failed', 'rejected', 'resolved'].map((s) => <option key={s} value={s}>{STATUS_LABELS[s]}</option>)}
+            {['delivered', 'tmsFailed', 'acknowledged', 'awaiting997', 'failed', 'rejected', 'resolved'].map((s) => <option key={s} value={s}>{STATUS_LABELS[s]}</option>)}
           </select>
           <label htmlFor="tx-range" className="sr-only">Time range</label>
           <select id="tx-range" value={f.range} onChange={set('range')}>

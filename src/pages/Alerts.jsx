@@ -14,7 +14,8 @@ export function useAlerts() {
     const env = t.env === 'test' ? ' (test)' : '';
     if (t.status === 'failed') alerts.push({ tone: 'bad', at: t.time, title: `${t.set} from ${name(t.partnerId)} failed validation${env}`, detail: t.errors[0]?.text, to: `/transactions/${t.id}` });
     if (t.status === 'rejected') alerts.push({ tone: 'bad', at: t.time, title: `${name(t.partnerId)} rejected your ${t.set}${env}`, detail: `${SET_NAMES[t.set]} · ${t.ref}`, to: `/transactions/${t.id}` });
-    if (t.status === 'awaiting997' && Date.now() - new Date(t.time).getTime() > WAIT_LIMIT_MIN * 60000) {
+    if (t.status === 'tmsFailed') alerts.push({ tone: 'bad', at: t.time, title: `${t.set} from ${name(t.partnerId)} didn’t reach your TMS${env}`, detail: `${t.tmsError || ''} Fix the webhook, then Reprocess.`.trim(), to: `/transactions/${t.id}` });
+    if (t.status === 'awaiting997' && Date.now() - new Date(t.sentAt || t.time).getTime() > WAIT_LIMIT_MIN * 60000) {
       alerts.push({ tone: 'warn', at: t.time, title: `No 997 from ${name(t.partnerId)} after ${WAIT_LIMIT_MIN} minutes${env}`, detail: `${t.set} ${t.ref}`, to: `/transactions/${t.id}` });
     }
   });

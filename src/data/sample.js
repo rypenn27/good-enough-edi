@@ -222,6 +222,7 @@ export const sampleSettings = {
   retentionDays: 90,
   apiKey: 'ge_live_7Q2mXc91rTb4Lw0pZs8kVn3e',
   webhooks: [
-    { id: 'wh-1', url: 'http://localhost:3001/api/edi/inbound', events: ['transaction.received', 'transaction.failed'], active: true },
+    // The built-in Test TMS (Test TMS page). Point this at your real TMS when you have one.
+    { id: 'wh-1', url: 'http://localhost:3002/api/mock-tms/webhook', events: ['transaction.received', 'transaction.failed', 'transaction.sent', 'ack.received'], active: true },
   ],
 };

@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom';
 
 const STATUS = {
   delivered: ['Delivered to TMS', 'ok'],
+  delivering: ['Sending to TMS', 'info'],
+  tmsFailed: ['TMS delivery failed', 'bad'],
   acknowledged: ['Acknowledged', 'ok'],
   sent: ['Sent', 'info'],
   awaiting997: ['Waiting on 997', 'warn'],

@@ -11,6 +11,7 @@ import Guidelines from './pages/Guidelines.jsx';
 import Alerts, { useAlerts } from './pages/Alerts.jsx';
 import ApiWebhooks from './pages/ApiWebhooks.jsx';
 import Settings from './pages/Settings.jsx';
+import TestTms from './pages/TestTms.jsx';
 
 const NAV = [
   ['/', 'Transactions'],
@@ -21,6 +22,7 @@ const NAV = [
   ['/alerts', 'Alerts'],
   ['/api', 'API & webhooks'],
   ['/settings', 'Settings'],
+  ['/test-tms', 'Test TMS'],
 ];
 
 export default function App() {
@@ -64,6 +66,7 @@ export default function App() {
           <Route path="/alerts" element={<Alerts />} />
           <Route path="/api" element={<ApiWebhooks />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/test-tms" element={<TestTms />} />
           <Route path="*" element={<p>That page doesn’t exist.</p>} />
         </Routes>
       </main>
