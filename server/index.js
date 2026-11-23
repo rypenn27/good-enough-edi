@@ -83,6 +83,7 @@ app.post('/api/transactions/:id/:action', (req, res) => {
   if (!action) return res.status(404).json({ error: `Unknown action "${req.params.action}".` });
   if (i < 0) return res.status(404).json({ error: 'That transaction doesn’t exist.' });
   const tx = action(db, i);
+  if (tx.error) return res.status(400).json({ error: tx.error });
   if (req.params.action === 'resend') {
     deliver(partnerOf(tx), tx);
     fire('transaction.sent', sentPayload(tx), tx.id);
@@ -95,8 +96,10 @@ app.post('/api/transactions/:id/:action', (req, res) => {
 app.post('/api/partners/:id/send-test', (req, res) => {
   const partner = db.partners.find((p) => p.id === req.params.id);
   if (!partner) return res.status(404).json({ error: 'That partner doesn’t exist.' });
-  const tx = sendTest(db, partner);
-  if (!tx) return res.status(400).json({ error: `${partner.name} has no outbound 990, 214 or 210 set up to test with.` });
+  const result = sendTest(db, partner);
+  if (!result) return res.status(400).json({ error: `${partner.name} has no outbound 990, 214 or 210 set up to test with.` });
+  if (result.error) return res.status(400).json({ error: result.error });
+  const { tx } = result;
   deliver(partner, tx);
   fire('transaction.sent', sentPayload(tx), tx.id);
   saveDb(db);
