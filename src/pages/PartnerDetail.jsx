@@ -2,9 +2,25 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useStore } from '../store.jsx';
 import { CONNECTION_TYPES, Empty, Facts, PageHeader, Pill, Tabs, dirLabel, fmtTime } from '../components/ui.jsx';
-import { SET_NAMES } from '../lib/x12.js';
+import { SET_NAMES, mappingDirection } from '../lib/x12.js';
 
 const STAGES = ['Not started', 'Testing', 'Live'];
+
+// Chooses which outbound mapping builds this set's files. Mappings made for other partners
+// are offered too, labelled with their partner.
+function OutboundMappingPicker({ set, index, partner, state, onChange }) {
+  const options = state.mappings.filter((m) => mappingDirection(m) === 'out' && m.set === set.set);
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <label htmlFor={`map-${index}`} className="sr-only">Mapping for outbound {set.set}</label>
+      <select id={`map-${index}`} className="cell" value={set.mapping || ''} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Built-in layout</option>
+        {options.map((m) => <option key={m.id} value={m.id}>{m.name}{m.partnerId !== partner.id ? ` (made for ${state.partners.find((p) => p.id === m.partnerId)?.name || m.partnerId})` : ''}</option>)}
+      </select>
+      {set.mapping && <Link to={`/mappings/${set.mapping}`} className="small">Edit</Link>}
+    </span>
+  );
+}
 
 export default function PartnerDetail() {
   const { id } = useParams();
@@ -34,6 +50,8 @@ export default function PartnerDetail() {
       notify(err.message, 'bad');
     }
   };
+
+  const setMapping = (i, mappingId) => update((p) => ({ ...p, sets: p.sets.map((x, j) => (j === i ? { ...x, mapping: mappingId || null } : x)) }));
 
   const addSet = () => {
     if (partner.sets.some((s) => s.set === newSet.set && s.dir === newSet.dir)) return notify('That transaction set is already set up.', 'bad');
@@ -109,7 +127,11 @@ export default function PartnerDetail() {
                         <td><span className="mono">{s.set}</span> <span className="muted">{SET_NAMES[s.set]}</span></td>
                         <td>{dirLabel(s.dir)}</td>
                         <td><Link to="/guidelines">{guidelineName(s.guideline)}</Link></td>
-                        <td>{mapping ? <Link to={`/mappings/${mapping.id}`}>{mapping.name}</Link> : <span className="muted">{s.dir === 'out' ? 'Built-in template' : 'None yet'}</span>}</td>
+                        <td>
+                          {s.dir === 'out' ? (
+                            <OutboundMappingPicker set={s} index={i} partner={partner} state={state} onChange={(mappingId) => setMapping(i, mappingId)} />
+                          ) : mapping ? <Link to={`/mappings/${mapping.id}`}>{mapping.name}</Link> : <span className="muted">None yet</span>}
+                        </td>
                         <td>{s.ack ? 'Yes' : 'No'}</td>
                         <td>
                           <label htmlFor={`stage-${i}`} className="sr-only">Stage for {s.set}</label>

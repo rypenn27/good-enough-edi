@@ -134,8 +134,8 @@ export default function TestTms() {
                         <Link to={`/transactions/${t990.id}`}>{accepted ? 'Accepted' : 'Declined'}</Link>
                       ) : sends(p, '990') ? (
                         <div className="actions">
-                          <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => send(p.id, '990', { shipmentId: d.externalRef, action: 'A' })}>Accept</button>
-                          <button type="button" className="btn btn-sm" disabled={busy} onClick={() => send(p.id, '990', { shipmentId: d.externalRef, action: 'D' })}>Decline</button>
+                          <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={() => send(p.id, '990', { shipmentId: d.externalRef, action: 'A', po: d.poNumber })}>Accept</button>
+                          <button type="button" className="btn btn-sm" disabled={busy} onClick={() => send(p.id, '990', { shipmentId: d.externalRef, action: 'D', po: d.poNumber })}>Decline</button>
                         </div>
                       ) : <span className="muted small">Partner doesn’t take 990s</span>}
                       {t990 && <div className="small"><Pill status={t990.status} /></div>}
@@ -148,7 +148,7 @@ export default function TestTms() {
                             <select id={`st-${r.id}`} value={code} onChange={(e) => setStatus214({ ...status214, [r.id]: e.target.value })}>
                               {Object.entries(STATUSES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
                             </select>
-                            <button type="button" className="btn btn-sm" disabled={busy} onClick={() => send(p.id, '214', { shipmentId: d.externalRef, status: code, city: where?.city, state: where?.state })}>Send</button>
+                            <button type="button" className="btn btn-sm" disabled={busy} onClick={() => send(p.id, '214', { shipmentId: d.externalRef, status: code, city: where?.city, state: where?.state, po: d.poNumber })}>Send</button>
                           </div>
                         ) : <span className="muted small">Accept first</span>
                       ) : <span className="muted small">Partner doesn’t take 214s</span>}
@@ -158,7 +158,7 @@ export default function TestTms() {
                       {t210 ? (
                         <><Link to={`/transactions/${t210.id}`}>Invoice {t210.fields.invoice}</Link><div className="small"><Pill status={t210.status} /></div></>
                       ) : sends(p, '210') ? (
-                        accepted ? <button type="button" className="btn btn-sm" disabled={busy} onClick={() => send(p.id, '210', { invoice: `INV-${d.externalRef}`, shipmentId: d.externalRef, amount: d.rate ?? 0 })}>Send invoice</button> : <span className="muted small">Accept first</span>
+                        accepted ? <button type="button" className="btn btn-sm" disabled={busy} onClick={() => send(p.id, '210', { invoice: `INV-${d.externalRef}`, shipmentId: d.externalRef, amount: d.rate ?? 0, po: d.poNumber })}>Send invoice</button> : <span className="muted small">Accept first</span>
                       ) : <span className="muted small">Partner doesn’t take 210s</span>}
                     </td>
                   </tr>

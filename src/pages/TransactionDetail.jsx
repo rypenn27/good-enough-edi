@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useStore } from '../store.jsx';
 import { Facts, PageHeader, Pill, Tabs, fmtDateTime, fmtTime } from '../components/ui.jsx';
-import { SEGMENT_NAMES, SET_NAMES, buildX12, elementLabel, envelope, parseX12, runMapping } from '../lib/x12.js';
+import { SEGMENT_NAMES, SET_NAMES, buildX12, elementLabel, envelope, mappingDirection, parseX12, runMapping } from '../lib/x12.js';
 
 // Saves text as a file in the browser's downloads.
 function saveFile(name, text) {
@@ -24,7 +24,7 @@ export default function TransactionDetail() {
 
   const env = envelope(segments);
   const errorLines = new Set(tx.errors.map((e) => e.line));
-  const mapping = tx.dir === 'in' ? state.mappings.find((m) => m.partnerId === tx.partnerId && m.set === tx.set) : null;
+  const mapping = tx.dir === 'in' ? state.mappings.find((m) => m.partnerId === tx.partnerId && m.set === tx.set && mappingDirection(m) === 'in') : null;
   const ctx = { partnerName: (isaId) => state.partners.find((p) => p.isaId === isaId || p.testIsaId === isaId)?.name };
   const json = mapping ? runMapping(segments, mapping.rules, ctx).output : tx.fields || { note: 'No mapping for this partner and transaction set yet.' };
 
