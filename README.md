@@ -69,7 +69,33 @@ POST http://localhost:3002/api/outbound
 | 214 | `shipmentId`, `status` (e.g. `AF`, `X1`, `D1`), `city`, `state` |
 | 210 | `invoice`, `shipmentId`, `amount` (dollars) |
 
-The file is checked against the partner's guideline, written to their `outbound` folder, and waits for their 997. When the 997 arrives in `inbound`, it's matched by group control number and the file is marked acknowledged or rejected. No 997 after 30 minutes raises an alert.
+Any other fields (such as `po`) are passed through for outbound mappings to use. The file is built with the partner's outbound mapping if one is linked (see below), checked against the partner's guideline, written to their `outbound` folder, and waits for their 997. When the 997 arrives in `inbound`, it's matched by group control number and the file is marked acknowledged or rejected. No 997 after 30 minutes raises an alert.
+
+**Outbound mappings.** Out of the box every partner gets the same built-in layout for each set. When a partner wants something different, give them an outbound mapping: on the Mappings page press **New outbound mapping**, or pick one for an outbound set on the partner's page.
+
+A mapping is the list of segments that go between ST and SE, in order. Each element is either a fixed value (`GEBK`, `PO`, or empty) or a TMS field path (`shipmentId`, `pickup.city`) with a transform:
+
+| Transform | Turns | Into |
+|---|---|---|
+| Copy | `30117` | `30117` |
+| Uppercase | `Akron` | `AKRON` |
+| Date CCYYMMDD | `2026-12-01` or `20261201` | `20261201` |
+| Time HHMM | `14:05` or an ISO date-time | `1405` |
+| Money in cents | `1640.5` | `164050` |
+
+Tick **Required** on a field the partner can't do without: if the TMS leaves it out, the API answers 400 with the segment, element and field that's missing, and nothing is sent. A segment marked **Leave out when its TMS fields are empty** is dropped when none of its fields have a value (handy for an optional PO reference). `date` (and `time` for 214s) are filled in with the moment the file is built. The envelope (ISA, GS, ST, SE, GE, IEA) is always added for you, with the right SE count.
+
+The editor shows the whole file live as you change it, built from sample TMS JSON you can paste in, with problems and guideline failures highlighted. The same mapping is used by the API, **Send a test file** and **Send again** (which rebuilds the file with the current mapping under the same control number).
+
+The sample data includes three:
+
+| Mapping | What's different from the built-in layout |
+|---|---|
+| Load response → Northline 990 | Adds `L11*<po>*PO` with the load's PO number |
+| Status update → Atlas 214 | B10 carries only the shipment ID; adds `L11*<id>*BM` and `L11*<po>*PO`; city and state in capitals |
+| Invoice → Bluewater 210 | Adds `L11*<id>*BM` so Bluewater can match the invoice to the load |
+
+So the same Accept on Test TMS gives Northline `B1…` plus `L11…*PO`, while Atlas gets just `B1…`. If your `data/db.json` was made before outbound mappings existed, the server adds these samples when it starts, and links each one only if that partner's set has no mapping yet.
 
 **Test TMS.** The Test TMS page is a pretend TMS built in. The sample webhook points at it, so you can try the whole loop on one PC:
 
@@ -98,9 +124,9 @@ To set it up on another PC, install it (`winget install drakkan.SFTPGo`), create
 |---|---|
 | Transactions | Every file in and out, with filters, counts and file upload |
 | Transaction detail | Raw X12 with problem lines highlighted, a readable view, the JSON sent to the TMS, envelope IDs, timeline, and Reprocess / Mark resolved / Send again |
-| Trading partners | Partner list, add a partner, and each partner's IDs, connection, transaction sets, onboarding checklist and contacts |
+| Trading partners | Partner list, add a partner, and each partner's IDs, connection, transaction sets (with the mapping each outbound set uses), onboarding checklist and contacts |
 | Connections | The local inbox folders, the planned SFTP server and AS2 station, and each partner's connection |
-| Mappings | Mapping editor that turns an inbound 204 into a TMS load, with live results against a sample file |
+| Mappings | Every mapping with its direction. Inbound mappings turn a partner's 204 into a TMS load, with live results against a sample file. Outbound mappings turn TMS data into each partner's 990, 214, 210 or 204, with a live X12 preview |
 | Guidelines | The checks each partner's files must pass |
 | Alerts | Failed files, rejections, late 997s, unreadable inbox files and broken connections |
 | API & webhooks | API key and webhook addresses for the TMS |
@@ -113,14 +139,14 @@ Production and Test are switched in the sidebar.
 
 - `server/index.js`: API routes and the inbox scan loop
 - `server/inbox.js`: partner folders, picking up files, writing outbound files
-- `server/process.js`: matching, checking, 997s (sent and received), outbound files and transaction actions
+- `server/process.js`: matching, checking, 997s (sent and received), outbound files (through the partner's outbound mapping when linked) and transaction actions
 - `server/webhooks.js`: sends events to the TMS webhooks, with retries
 - `server/mockTms.js`: the Test TMS's webhook receiver
-- `server/db.js`: reads and writes `data/db.json`
-- `src/lib/x12.js`: builds, reads and checks X12 files, and runs mappings (used by both server and browser)
-- `src/data/sample.js`: sample partners, guidelines, mappings and files (all fictional)
+- `server/db.js`: reads and writes `data/db.json`, and adds new sample mappings to older databases
+- `src/lib/x12.js`: builds, reads and checks X12 files, and runs inbound and outbound mappings (used by both server and browser)
+- `src/data/sample.js`: sample partners, guidelines, mappings (inbound and outbound), starter layouts for new outbound mappings, and files (all fictional)
 - `src/store.jsx`: loads data from the API, polls for changes, saves edits
-- `src/pages/`: one file per page
+- `src/pages/`: one file per page (`OutboundMappingEditor.jsx` is opened from `MappingEditor.jsx` for outbound mappings)
 
 `data/` and `edi-inbox/` are created when the server first runs and aren't committed.
 
