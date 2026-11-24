@@ -3,6 +3,8 @@
 // outbound mapping that turns TMS JSON into a partner's X12.
 
 const GS_CODES = { '204': 'SM', '990': 'GF', '214': 'QM', '210': 'IM', '997': 'FA' };
+// The set a group's functional code (GS-01, AK1-01) stands for.
+export const SET_FOR_CODE = Object.fromEntries(Object.entries(GS_CODES).map(([set, code]) => [code, set]));
 
 export const SET_NAMES = {
   '204': 'Load Tender',
@@ -86,7 +88,7 @@ function defaultBody(set, f) {
     case '210':
       return [`B3**${f.invoice}*${f.shipmentId}*PP**${f.date}*${Math.round(f.amount * 100)}`];
     case '997':
-      return [`AK1*${GS_CODES[f.ackSet]}*${Number(f.ackControl)}`, `AK2*${f.ackSet}*0001`, `AK5*${f.accepted ? 'A' : 'R'}`, `AK9*${f.accepted ? 'A' : 'R'}*1*1*${f.accepted ? 1 : 0}`];
+      return ack997Body({ code: GS_CODES[f.ackSet], control: Number(f.ackControl), sets: [{ set: f.ackSet, control: '0001', errors: f.accepted ? [] : [{ text: 'Rejected' }] }] });
     default:
       return [];
   }
@@ -101,31 +103,229 @@ export function stampFields(set, fields, date) {
 
 // Builds a complete interchange (ISA through IEA), one segment per line. `body` is a list of
 // segment lines (e.g. from runOutboundMapping); without it the set's built-in layout is used.
-export function buildX12({ set, control, senderId, receiverId, date, usage = 'P', fields, body }) {
+// `bodies` puts several transaction sets of the same kind in the one group (used for 997s).
+export function buildX12({ set, control, senderId, receiverId, date, usage = 'P', fields, body, bodies, version = '004010' }) {
   const s = stamp(date);
   const group = String(Number(control));
-  const inner = [`ST*${set}*0001`, ...(body || defaultBody(set, fields))];
-  inner.push(`SE*${inner.length + 1}*0001`);
+  const inner = (bodies || [body || defaultBody(set, fields)]).flatMap((lines, i) => {
+    const setControl = String(i + 1).padStart(4, '0');
+    const seg = [`ST*${set}*${setControl}`, ...lines];
+    return [...seg, `SE*${seg.length + 1}*${setControl}`];
+  });
+  // 00501 files use ISA-11 as the repetition separator; earlier versions put U there.
+  const isa5 = version.startsWith('005');
   const lines = [
-    `ISA*00*${pad('', 10)}*00*${pad('', 10)}*ZZ*${pad(senderId, 15)}*ZZ*${pad(receiverId, 15)}*${s.yymmdd}*${s.hhmm}*U*00401*${control}*0*${usage}*>`,
-    `GS*${GS_CODES[set]}*${senderId}*${receiverId}*${s.ccyymmdd}*${s.hhmm}*${group}*X*004010`,
+    `ISA*00*${pad('', 10)}*00*${pad('', 10)}*ZZ*${pad(senderId, 15)}*ZZ*${pad(receiverId, 15)}*${s.yymmdd}*${s.hhmm}*${isa5 ? '^' : 'U'}*${isa5 ? '00501' : '00401'}*${control}*0*${usage}*>`,
+    `GS*${GS_CODES[set]}*${senderId}*${receiverId}*${s.ccyymmdd}*${s.hhmm}*${group}*X*${version}`,
     ...inner,
-    `GE*1*${group}`,
+    `GE*${bodies ? bodies.length : 1}*${group}`,
     `IEA*1*${control}`,
   ];
   return lines.map((l) => `${l}~`).join('\n');
 }
 
-// Splits a file into segments: [{ line, id, elements, text }]. Element n is elements[n - 1].
-export function parseX12(raw) {
-  return raw
-    .split('~')
+// ---- Reading files ----
+// Partners pick their own separators, and the ISA says which. The character right after
+// "ISA" separates elements, ISA-16 is the component separator, and the character after
+// ISA-16 ends every segment. The ISA is fixed width (106 characters with its terminator),
+// but we count element separators instead of columns, so an ID that wasn't padded properly
+// doesn't throw everything off. From version 00501, ISA-11 is the repetition separator.
+// Files we build ourselves always use * ~ and >.
+const DEFAULT_DELIMITERS = { element: '*', component: '>', segment: '~', repetition: null };
+const NOT_X12 = 'This doesn’t look like an X12 file. It should start with an ISA segment.';
+
+// Takes off a byte order mark and anything blank before the ISA.
+const cleanStart = (raw) => String(raw ?? '').replace(/^﻿/, '').replace(/^\s+/, '');
+
+export function readDelimiters(raw) {
+  const text = cleanStart(raw);
+  if (!text.startsWith('ISA')) return { error: NOT_X12 };
+  const element = text[3];
+  if (!element || /[\sA-Za-z0-9]/.test(element)) return { error: `${NOT_X12} The character after "ISA" should be the element separator.` };
+  let at = 3;
+  for (let n = 2; n <= 16; n++) {
+    at = text.indexOf(element, at + 1);
+    if (at < 0 || at > 200) return { error: `The ISA segment is cut short: it should have 16 elements separated by "${element}".` };
+  }
+  const component = text[at + 1];
+  const segment = text[at + 2];
+  if (!component || /[\sA-Za-z0-9]/.test(component) || component === element) return { error: 'ISA-16 should be the component separator, a single symbol such as > or :.' };
+  if (!segment || /[A-Za-z0-9 ]/.test(segment) || [element, component].includes(segment)) return { error: 'The ISA segment should end with a segment terminator, such as ~, right after ISA-16.' };
+  const isa = text.slice(0, at + 1).split(element);
+  const repetition = isa[12] >= '00501' && /^[^\sA-Za-z0-9]$/.test(isa[11]) ? isa[11] : null;
+  return { element, component, segment, repetition };
+}
+
+// Reads a file into { delimiters, segments, error }. Each segment is
+// { line, id, elements, text }; element n is elements[n - 1] and `line` counts segments
+// from 1. Blank space and line breaks after each terminator are ignored. A file without a
+// valid ISA is read with the usual * and ~ and comes back with an error.
+export function readX12(raw) {
+  const found = readDelimiters(raw);
+  const delimiters = found.error ? DEFAULT_DELIMITERS : found;
+  const segments = cleanStart(raw)
+    .split(delimiters.segment)
     .map((t) => t.trim())
     .filter(Boolean)
     .map((text, i) => {
-      const [id, ...elements] = text.split('*');
+      const [id, ...elements] = text.split(delimiters.element);
       return { line: i + 1, id, elements: elements.map((e) => e.trim()), text };
     });
+  return { delimiters, segments, error: found.error };
+}
+
+export function parseX12(raw) {
+  return readX12(raw).segments;
+}
+
+const sameControl = (a, b) => (/^\d+$/.test(a) && /^\d+$/.test(b) ? Number(a) === Number(b) : a === b);
+
+// Splits an interchange into its groups (GS..GE) and transaction sets (ST..SE) and checks the
+// envelope: ISA-13 = IEA-02, IEA-01 = number of groups, GS-06 = GE-02, GE-01 = number of sets,
+// ST-02 = SE-02 and SE-01 = number of segments from ST to SE. Returns { error } for a file
+// without a valid ISA, otherwise:
+//   { delimiters, segments, problems, groups: [{ code, control, version, count (GE-01), gs, ge, problems,
+//     sets: [{ set, control, st, end, problems, errors }] }] }
+// gs, ge, st and end are line numbers (ge is null when the GE is missing). Each problem is
+// { line, text } plus `ak5` or `ak9`, the code our 997 reports it with. A set's `errors` are
+// every envelope problem that touches it: its own, its group's and the whole file's.
+export function splitInterchange(raw) {
+  const { delimiters, segments, error } = readX12(raw);
+  if (error) return { error };
+  const isa = segments[0];
+  const problems = [];
+  const groups = [];
+  let group = null;
+  let set = null;
+  let iea = null;
+  const problem = (line, text, code = {}) => ({ line, text, ...code });
+
+  const closeSet = (lastLine) => {
+    set.end = lastLine;
+    set.problems.push(problem(set.st, `Transaction set ${set.control} (ST at line ${set.st}) has no SE.`, { ak5: '2' }));
+    set = null;
+  };
+  const closeGroup = (line) => {
+    if (set) closeSet(line - 1);
+    group.problems.push(problem(group.gs, `Group ${group.control} (GS at line ${group.gs}) has no GE.`, { ak9: '2' }));
+    group = null;
+  };
+
+  for (const seg of segments.slice(1)) {
+    const el = (n) => seg.elements[n - 1] || '';
+    if (iea) {
+      problems.push(problem(seg.line, `${seg.id} at line ${seg.line} comes after the IEA, which should end the file.`));
+      continue;
+    }
+    if (seg.id === 'GS') {
+      if (group) closeGroup(seg.line);
+      group = { code: el(1), control: el(6), version: el(8), gs: seg.line, ge: null, problems: [], sets: [] };
+      groups.push(group);
+    } else if (seg.id === 'ST') {
+      if (set) closeSet(seg.line - 1);
+      if (!group) {
+        group = { code: '', control: '', version: '', gs: null, ge: null, problems: [problem(seg.line, `ST at line ${seg.line} isn’t inside a group (GS).`, { ak9: '2' })], sets: [] };
+        groups.push(group);
+      }
+      set = { set: el(1), control: el(2), st: seg.line, end: null, problems: [] };
+      group.sets.push(set);
+    } else if (seg.id === 'SE') {
+      if (!set) {
+        (group?.problems || problems).push(problem(seg.line, `SE at line ${seg.line} has no ST before it.`));
+        continue;
+      }
+      const count = seg.line - set.st + 1;
+      if (String(Number(el(1))) !== String(count)) set.problems.push(problem(seg.line, `SE-01 says the set has ${el(1) || 'no'} segments, but it has ${count} from ST to SE.`, { ak5: '4' }));
+      if (!sameControl(el(2), set.control)) set.problems.push(problem(seg.line, `SE-02 control number "${el(2)}" doesn’t match ST-02 "${set.control}".`, { ak5: '3' }));
+      set.end = seg.line;
+      set = null;
+    } else if (seg.id === 'GE') {
+      if (set) closeSet(seg.line - 1);
+      if (!group) {
+        problems.push(problem(seg.line, `GE at line ${seg.line} has no GS before it.`));
+        continue;
+      }
+      group.ge = seg.line;
+      group.count = el(1);
+      if (String(Number(el(1))) !== String(group.sets.length)) group.problems.push(problem(seg.line, `GE-01 says group ${group.control} has ${el(1) || 'no'} transaction sets, but it has ${group.sets.length}.`, { ak9: '5' }));
+      if (!sameControl(el(2), group.control)) group.problems.push(problem(seg.line, `GE-02 control number "${el(2)}" doesn’t match GS-06 "${group.control}".`, { ak9: '4' }));
+      group = null;
+    } else if (seg.id === 'IEA') {
+      if (group) closeGroup(seg.line);
+      iea = seg;
+      if (String(Number(el(1))) !== String(groups.length)) problems.push(problem(seg.line, `IEA-01 says the file has ${el(1) || 'no'} groups, but it has ${groups.length}.`));
+      if (!sameControl(el(2), isa.elements[12])) problems.push(problem(seg.line, `IEA-02 control number "${el(2)}" doesn’t match ISA-13 "${isa.elements[12]}".`));
+    } else if (!set) {
+      (group?.problems || problems).push(problem(seg.line, `${seg.id} at line ${seg.line} is outside any transaction set (ST to SE).`));
+    }
+  }
+  const last = segments[segments.length - 1].line;
+  if (set) closeSet(last);
+  if (group) closeGroup(last + 1);
+  if (!iea) problems.push(problem(null, 'The file has no IEA at the end. It may have been cut off.'));
+
+  for (const g of groups) for (const s of g.sets) s.errors = [...problems, ...g.problems, ...s.problems];
+  return { delimiters, segments, problems, groups };
+}
+
+// The segments an inbound transaction is about. An entry from a file holding several
+// transaction sets keeps the whole file as received in `raw`, plus `part`: the line numbers
+// of its group's GS and GE and its own ST through its last line. We keep the real file
+// rather than a rebuilt copy so line numbers match what the partner sent (handy when telling
+// them "line 37 is wrong") and Download gives back their actual file. Entries from
+// single-set files have no `part` and use the whole file.
+export function txSegments(tx) {
+  const all = parseX12(tx?.raw || '');
+  const p = tx?.part;
+  if (!p) return all;
+  return all.filter((s) => s.id === 'ISA' || s.id === 'IEA' || s.line === p.gs || s.line === p.ge || (s.line >= p.st && s.line <= p.end));
+}
+
+// ---- 997s ----
+// The body of one 997 answering one functional group:
+//   group: { code (GS-01), control (GS-06), count (GE-01, optional), problems (group level),
+//            sets: [{ set (ST-01), control (ST-02), st (line of the ST), errors }] }
+// A set with no errors is accepted (AK5 A). A rejected set gets AK3/AK4 lines for each
+// problem we can point at a segment and element, and AK5 R with a reason code. AK9 is
+// A when every set was accepted, P when some were and R when none were.
+const AK4_CODES = { missing: '1', format: '7' };
+const ackValue = (v) => String(v ?? '').replace(/[*~>^]/g, ' ').slice(0, 99);
+
+export function ack997Body(group) {
+  const lines = [`AK1*${group.code}*${group.control}`];
+  let accepted = 0;
+  for (const s of group.sets) {
+    lines.push(`AK2*${s.set}*${s.control}`);
+    const pointed = s.errors.filter((e) => e.line && e.seg && s.st && e.line >= s.st);
+    for (const line of [...new Set(pointed.map((e) => e.line))]) {
+      const onLine = pointed.filter((e) => e.line === line);
+      lines.push(`AK3*${onLine[0].seg}*${line - s.st + 1}**8`);
+      onLine.filter((e) => e.el).forEach((e) => lines.push(`AK4*${e.el}**${AK4_CODES[e.fault] || '7'}${e.value ? `*${ackValue(e.value)}` : ''}`));
+    }
+    if (!s.errors.length) {
+      accepted += 1;
+      lines.push('AK5*A');
+    } else {
+      const codes = [...new Set(s.errors.map((e) => e.ak5).filter(Boolean))];
+      lines.push(`AK5*R*${(codes.length ? codes : ['5']).slice(0, 5).join('*')}`);
+    }
+  }
+  const n = group.sets.length;
+  const result = accepted === n ? 'A' : accepted ? 'P' : 'R';
+  const groupCodes = [...new Set((group.problems || []).map((e) => e.ak9).filter(Boolean))].slice(0, 5);
+  lines.push(['AK9', result, group.count ?? n, n, accepted, ...groupCodes].join('*'));
+  return lines;
+}
+
+// A whole 997 interchange: one GS*FA group holding one 997 per group being answered.
+export function build997({ groups, ...envelopeFields }) {
+  return buildX12({ ...envelopeFields, set: '997', bodies: groups.map(ack997Body) });
+}
+
+// The result a 997 gives a group: A, P or R (see ack997Body).
+export function groupResult(group) {
+  const ok = group.sets.filter((s) => !s.errors.length).length;
+  return ok === group.sets.length ? 'A' : ok ? 'P' : 'R';
 }
 
 export function elementLabel(segId, n) {
@@ -144,10 +344,12 @@ export function envelope(segments) {
     group: gs?.elements[5] || '',
     version: gs?.elements[7] || '',
     set: st?.elements[0] || '',
+    setControl: st?.elements[1] || '',
   };
 }
 
 // Guideline rules: { seg, el, required } | { seg, el, pattern } | { seg, minCount }.
+// Problems found on a segment also say which element and why, for the 997's AK3/AK4.
 export function validate(segments, guideline) {
   if (!guideline) return [];
   const errors = [];
@@ -163,9 +365,9 @@ export function validate(segments, guideline) {
     }
     for (const s of matches) {
       const value = s.elements[rule.el - 1] || '';
-      if (rule.required && !value) errors.push({ line: s.line, text: rule.text });
+      if (rule.required && !value) errors.push({ line: s.line, text: rule.text, seg: rule.seg, el: rule.el, fault: 'missing' });
       else if (rule.pattern && value && !new RegExp(rule.pattern).test(value)) {
-        errors.push({ line: s.line, text: `${rule.text} Found "${value}".` });
+        errors.push({ line: s.line, text: `${rule.text} Found "${value}".`, seg: rule.seg, el: rule.el, fault: 'format', value });
       }
     }
   }
