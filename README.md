@@ -94,6 +94,44 @@ It writes the 997 straight into `edi-inbox/northline/inbound` (add `--stdout` to
 | `transaction.sent` | A file was sent to a partner |
 | `ack.received` | A partner's 997 arrived and was matched to the file it answers |
 
+Every webhook is a POST of `{ event, sentAt, data }` with an `X-Good-Enough-Event` header. `data.partner` always says who it's about, so the TMS can match the partner to its own customer by ISA ID:
+
+```
+"partner": { "id": "northline", "name": "Northline Foods", "isaQualifier": "ZZ", "isaId": "NORTHLINE", "testIsaId": "NORTHLINET" }
+```
+
+`id` is the partner's id here: send it back as `partnerId` when the TMS sends a file. The rest of `data`:
+
+| Event | Fields |
+|---|---|
+| `transaction.received` | `transactionId`, `set`, `control`, `env` (`production` or `test`), `mapping`, `data` (the mapped JSON; for a 204: `externalRef`, `action` `new` or `cancel`, `poNumber`, `pickup` and `delivery` with `name`, `city`, `state`, `zip`, `date`, `weightLbs`, `rate`) |
+| `transaction.failed` | `transactionId`, `set`, `control`, `env`, `errors` (plain-language problems) |
+| `transaction.sent` | `transactionId` (the same id `/api/outbound` answered with), `set`, `control`, `ref`, `env`, `fields` |
+| `ack.received` | `transactionId`, `set`, `control`, `ref`, `status` (`acknowledged` or `rejected`); `transactionId` is null and `status` is `unmatched` when the 997 matched none of our files |
+
+**Signed webhooks.** Each webhook can have a signing secret: one is made when you add a webhook, and **Make a new secret** on the API & webhooks page replaces it (the old one stops working at once). A webhook with a secret sends
+
+```
+X-Good-Enough-Signature: sha256=<hex HMAC-SHA256 of the exact request body, keyed with the secret>
+```
+
+The TMS should work out the same HMAC over the raw bytes it received (before parsing the JSON) and compare the two in constant time, turning the call away if they differ. In Node:
+
+```js
+const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+const ok = header?.length === expected.length && crypto.timingSafeEqual(Buffer.from(header), Buffer.from(expected));
+```
+
+Webhooks made before signing existed have no secret and aren't signed until you press **Make a secret**. The built-in Test TMS doesn't check signatures.
+
+**Connecting Good Enough TMS.** Good Enough TMS takes these webhooks at `/api/edi/webhook` and turns 204s into loads:
+
+1. On **API & webhooks**, add the webhook `http://localhost:3001/api/edi/webhook` and tick all four events. Copy its signing secret.
+2. In the TMS's `backend/.env`, set `EDI_WEBHOOK_SECRET` to that secret, `EDI_API_KEY` to the API key on the same page, and `EDI_API_URL=http://localhost:3002`. Restart the TMS API.
+3. Pause or remove the Test TMS webhook if you don't want both to get every event (they can run side by side).
+
+The TMS answers 401 to a missing or wrong signature (the file's timeline here shows the failed tries, and if no other webhook took it, it's marked "TMS delivery failed"), and a 2xx to anything else, including partners it can't match to a customer, which it lists for its admins. Its README has a step-by-step demo.
+
 **The TMS sends files out through the API.** Send the API key (API & webhooks page) in an `X-API-Key` header:
 
 ```
@@ -168,7 +206,7 @@ To set it up on another PC, install it (`winget install drakkan.SFTPGo`), create
 | Mappings | Every mapping with its direction. Inbound mappings turn a partner's 204 into a TMS load, with live results against a sample file. Outbound mappings turn TMS data into each partner's 990, 214, 210 or 204, with a live X12 preview |
 | Guidelines | The checks each partner's files must pass |
 | Alerts | Failed files, rejections, late 997s, unreadable inbox files and broken connections |
-| API & webhooks | API key and webhook addresses for the TMS |
+| API & webhooks | API key, and webhook addresses for the TMS with their signing secrets |
 | Settings | Company details, your EDI IDs, and a reset back to the sample data |
 | Test TMS | A pretend TMS: loads it received by webhook, with Accept / Decline, status and invoice buttons |
 
@@ -179,7 +217,7 @@ Production and Test are switched in the sidebar.
 - `server/index.js`: API routes and the inbox scan loop
 - `server/inbox.js`: partner folders, picking up files, writing outbound files
 - `server/process.js`: matching, splitting each file into one transaction per set, checking, 997s (one interchange answering each file; partner 997s matched to our files), outbound files (through the partner's outbound mapping when linked) and transaction actions
-- `server/webhooks.js`: sends events to the TMS webhooks, with retries
+- `server/webhooks.js`: sends events to the TMS webhooks, signed when the webhook has a secret, with retries
 - `server/mockTms.js`: the Test TMS's webhook receiver
 - `server/db.js`: reads and writes `data/db.json`, and adds new sample mappings to older databases
 - `src/lib/x12.js`: builds X12 files (997s included), reads them with whatever separators the ISA names, splits interchanges into groups and transaction sets with envelope checks, checks sets against guidelines, and runs inbound and outbound mappings (used by both server and browser)
