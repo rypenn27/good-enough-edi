@@ -1,5 +1,6 @@
 // Small X12 helpers: build sample files, read them into segments, check them against a
-// partner guideline, and run a mapping that turns an inbound file into TMS JSON.
+// partner guideline, run a mapping that turns an inbound file into TMS JSON, and run an
+// outbound mapping that turns TMS JSON into a partner's X12.
 
 const GS_CODES = { '204': 'SM', '990': 'GF', '214': 'QM', '210': 'IM', '997': 'FA' };
 
@@ -53,7 +54,8 @@ function stamp(date) {
   };
 }
 
-function body(set, f) {
+// The built-in layout of each set, used when a partner has no outbound mapping.
+function defaultBody(set, f) {
   switch (set) {
     case '204':
       return [
@@ -90,11 +92,19 @@ function body(set, f) {
   }
 }
 
-// Builds a complete interchange (ISA through IEA), one segment per line.
-export function buildX12({ set, control, senderId, receiverId, date, usage = 'P', fields }) {
+// Values every outbound file gets from the moment it's built, on top of the TMS fields.
+export function stampFields(set, fields, date) {
+  const s = stamp(date);
+  const extra = set === '214' ? { date: s.ccyymmdd, time: '0000' } : ['990', '210'].includes(set) ? { date: s.ccyymmdd } : {};
+  return { ...fields, ...extra };
+}
+
+// Builds a complete interchange (ISA through IEA), one segment per line. `body` is a list of
+// segment lines (e.g. from runOutboundMapping); without it the set's built-in layout is used.
+export function buildX12({ set, control, senderId, receiverId, date, usage = 'P', fields, body }) {
   const s = stamp(date);
   const group = String(Number(control));
-  const inner = [`ST*${set}*0001`, ...body(set, fields)];
+  const inner = [`ST*${set}*0001`, ...(body || defaultBody(set, fields))];
   inner.push(`SE*${inner.length + 1}*0001`);
   const lines = [
     `ISA*00*${pad('', 10)}*00*${pad('', 10)}*ZZ*${pad(senderId, 15)}*ZZ*${pad(receiverId, 15)}*${s.yymmdd}*${s.hhmm}*U*00401*${control}*0*${usage}*>`,
@@ -164,6 +174,9 @@ export function validate(segments, guideline) {
 
 // ---- Mapping engine ----
 
+// Mappings made before outbound mappings existed have no direction; they're inbound.
+export const mappingDirection = (m) => m?.direction || 'in';
+
 export const TRANSFORMS = {
   copy: { label: 'Copy', run: (v) => v },
   number: { label: 'Number', run: (v) => (isNaN(Number(v)) ? undefined : Number(v)) },
@@ -213,4 +226,87 @@ export function runMapping(segments, rules, ctx) {
     return r;
   });
   return { output, results, failed: results.filter((r) => !r.ok).length };
+}
+
+// ---- Outbound mapping engine ----
+// An outbound mapping (direction 'out') lists the body segments of the file in order:
+//   segments: [{ id, seg: 'B1', optional, elements: [{ id, kind, value, path, fn, required }] }]
+// kind 'fixed' sends `value` as is; kind 'field' reads `path` (e.g. 'pickup.city') from the
+// TMS fields and runs transform `fn`. An optional segment is left out when none of its
+// fields have a value.
+
+const twoDigits = (v) => String(v).padStart(2, '0');
+
+export const OUT_TRANSFORMS = {
+  copy: { label: 'Copy', run: (v) => String(v) },
+  upper: { label: 'Uppercase', run: (v) => String(v).toUpperCase() },
+  date: {
+    label: 'Date CCYYMMDD',
+    run: (v) => {
+      const m = /^(\d{4})-?(\d{2})-?(\d{2})/.exec(String(v));
+      return m ? `${m[1]}${m[2]}${m[3]}` : undefined;
+    },
+  },
+  time: {
+    label: 'Time HHMM',
+    run: (v) => {
+      const m = /(?:^|T)(\d{1,2}):?(\d{2})/.exec(String(v));
+      return m ? `${twoDigits(m[1])}${m[2]}` : undefined;
+    },
+  },
+  cents: { label: 'Money in cents', run: (v) => (v === '' || isNaN(Number(v)) ? undefined : String(Math.round(Number(v) * 100))) },
+};
+
+const ENVELOPE_IDS = ['ISA', 'GS', 'ST', 'SE', 'GE', 'IEA'];
+
+export function getPath(obj, path) {
+  return String(path || '').split('.').reduce((cur, k) => (cur == null ? undefined : cur[k]), obj);
+}
+
+// Every dotted path to a plain value in a TMS JSON object, for suggesting field paths.
+export function fieldPaths(obj, prefix = '') {
+  if (obj == null || typeof obj !== 'object' || Array.isArray(obj)) return prefix ? [prefix] : [];
+  return Object.entries(obj).flatMap(([k, v]) => fieldPaths(v, prefix ? `${prefix}.${k}` : k));
+}
+
+// One element's value: { ok, value, empty, note }. Separator characters are taken out of
+// TMS values so they can't break the file.
+export function runOutElement(el, fields) {
+  if (el.kind !== 'field') return { ok: true, value: String(el.value ?? ''), empty: false };
+  if (!el.path) return { ok: false, value: '', empty: true, note: 'has no TMS field chosen' };
+  const raw = getPath(fields, el.path);
+  if (raw === undefined || raw === null || raw === '') {
+    return el.required ? { ok: false, value: '', empty: true, note: `needs ${el.path}, which is missing from the TMS data` } : { ok: true, value: '', empty: true };
+  }
+  const transform = OUT_TRANSFORMS[el.fn || 'copy'];
+  const value = transform?.run(raw);
+  if (value === undefined) return { ok: false, value: '', empty: false, note: `can’t turn "${raw}" (${el.path}) into ${transform?.label || el.fn}` };
+  return { ok: true, value: value.replace(/[*~>]/g, ' '), empty: false };
+}
+
+// Runs an outbound mapping against TMS fields. Returns:
+//   lines:    body segment lines for buildX12 (no ST/SE)
+//   segments: per mapping segment { seg, included, line (index into lines or null), results }
+//   problems: [{ segment, el, text }] where segment is the index in mapping.segments
+export function runOutboundMapping(mapping, fields) {
+  const lines = [];
+  const problems = [];
+  const segments = (mapping?.segments || []).map((s, i) => {
+    const seg = String(s.seg || '').trim().toUpperCase();
+    const results = s.elements.map((el) => runOutElement(el, fields));
+    if (!/^[A-Z][A-Z0-9]{1,2}$/.test(seg)) problems.push({ segment: i, el: null, text: `Segment ${i + 1} needs an ID like B1 or L11.` });
+    else if (ENVELOPE_IDS.includes(seg)) problems.push({ segment: i, el: null, text: `${seg} is part of the envelope, which is added automatically. Remove segment ${i + 1}.` });
+    const hasFields = s.elements.some((el) => el.kind === 'field');
+    const skipped = s.optional && hasFields && s.elements.every((el, j) => el.kind !== 'field' || results[j].empty);
+    if (skipped) return { seg, included: false, line: null, results };
+    results.forEach((r, j) => {
+      if (!r.ok) problems.push({ segment: i, el: j + 1, text: `${seg || `Segment ${i + 1}`}-${twoDigits(j + 1)} ${r.note}.` });
+    });
+    const values = results.map((r) => r.value);
+    while (values.length && values[values.length - 1] === '') values.pop(); // no trailing empty elements
+    if (!values.length && problems.every((p) => p.segment !== i)) problems.push({ segment: i, el: null, text: `${seg} has no values. Give it one, or tick “Leave out when its TMS fields are empty”.` });
+    lines.push([seg, ...values].join('*'));
+    return { seg, included: true, line: lines.length - 1, results };
+  });
+  return { lines, segments, problems };
 }

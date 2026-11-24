@@ -5,7 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useReducer,
 const ENV_KEY = 'good-enough-edi:env';
 const POLL_MS = 2000;
 const SAVE_DELAY_MS = 400;
-const CONFIG_ACTIONS = new Set(['addPartner', 'updatePartner', 'updateMapping', 'updateSettings']);
+const CONFIG_ACTIONS = new Set(['addPartner', 'updatePartner', 'addMapping', 'updateMapping', 'removeMapping', 'updateSettings']);
 
 function savedEnv() {
   try {
@@ -32,6 +32,15 @@ function reducer(state, action) {
       return { ...state, partners: [...state.partners, action.partner] };
     case 'updatePartner':
       return { ...state, partners: state.partners.map((p) => (p.id === action.id ? action.fn(p) : p)) };
+    case 'addMapping':
+      return { ...state, mappings: [...state.mappings, action.mapping] };
+    case 'removeMapping':
+      // Partner sets that used it go back to having no mapping.
+      return {
+        ...state,
+        mappings: state.mappings.filter((m) => m.id !== action.id),
+        partners: state.partners.map((p) => ({ ...p, sets: p.sets.map((s) => (s.mapping === action.id ? { ...s, mapping: null } : s)) })),
+      };
     case 'updateMapping':
       return {
         ...state,

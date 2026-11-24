@@ -1,7 +1,7 @@
 // What happens to a file: inbound files are matched to a partner, checked against their
 // guideline and answered with a 997; partner 997s are matched to the file they answer;
-// outbound files are built from TMS data.
-import { envelope, parseX12, runMapping, validate } from '../src/lib/x12.js';
+// outbound files are built from TMS data, through the partner's outbound mapping when one is linked.
+import { envelope, mappingDirection, parseX12, runMapping, runOutboundMapping, stampFields, validate } from '../src/lib/x12.js';
 import { makeTransaction, OUR_IDS } from '../src/data/sample.js';
 
 const now = () => new Date().toISOString();
@@ -33,7 +33,7 @@ export function check(db, tx) {
 // there is one, otherwise just the basics.
 export function tmsPayload(db, tx) {
   const partner = db.partners.find((p) => p.id === tx.partnerId);
-  const mapping = db.mappings.find((m) => m.partnerId === tx.partnerId && m.set === tx.set);
+  const mapping = db.mappings.find((m) => m.partnerId === tx.partnerId && m.set === tx.set && mappingDirection(m) === 'in');
   const ctx = { partnerName: (isaId) => db.partners.find((p) => p.isaId === isaId || p.testIsaId === isaId)?.name };
   const base = { transactionId: tx.id, partner: { id: partner?.id, name: partner?.name }, set: tx.set, control: tx.control, env: tx.env };
   if (tx.errors.length) return { ...base, errors: tx.errors.map((e) => e.text) };
@@ -125,6 +125,31 @@ const REF = {
   '204': (f) => `Load ${f.shipmentId} tender`,
 };
 
+// The outbound mapping linked to a partner's set, if any.
+export function outboundMapping(db, partner, set) {
+  const link = partner?.sets.find((s) => s.set === set && s.dir === 'out');
+  return db.mappings.find((m) => m.id === link?.mapping && mappingDirection(m) === 'out') || null;
+}
+
+// Builds an outbound file with the partner's mapping (or the built-in layout) and checks it
+// against their guideline. Returns { error } or { tx }; doesn't add it to db.
+function buildOutbound(db, partner, { env, set, control, ref, status, fields }) {
+  const date = new Date();
+  const mapping = outboundMapping(db, partner, set);
+  let body;
+  if (mapping) {
+    const run = runOutboundMapping(mapping, stampFields(set, fields, date));
+    if (run.problems.length) return { error: `This ${set} can’t be built with the mapping “${mapping.name}”: ${run.problems.map((p) => p.text).join(' ')}` };
+    body = run.lines;
+  }
+  const tx = makeTransaction({ date, env, dir: 'out', partner, set, control, ref, status, fields, body });
+  const errors = validate(parseX12(tx.raw), guidelineFor(db, partner, set, 'out'));
+  if (errors.length) return { error: `This ${set} doesn’t pass the ${partner.name} guideline: ${errors.map((e) => e.text).join(' ')}` };
+  return { tx, mapping };
+}
+
+const builtFrom = (mapping) => (mapping ? `Built from TMS data with mapping “${mapping.name}” v${mapping.version}` : 'Built from TMS data (built-in layout)');
+
 // Builds an outbound file from TMS data: { partnerId, set, env, ref, fields }.
 // Returns { error } or { tx, partner } and adds the transaction to db.
 export function sendOutbound(db, { partnerId, set, env = 'production', ref, fields } = {}) {
@@ -133,17 +158,21 @@ export function sendOutbound(db, { partnerId, set, env = 'production', ref, fiel
   if (!REQUIRED[set]) return { error: `Set "${set}" can’t be sent. Use 990, 214, 210 or 204.` };
   if (!partner.sets.some((s) => s.set === set && s.dir === 'out')) return { error: `${partner.name} isn’t set up to receive ${set}s from you.` };
   if (!['production', 'test'].includes(env)) return { error: 'env must be "production" or "test".' };
-  const missing = REQUIRED[set].filter((k) => fields?.[k] === undefined || fields[k] === '');
-  if (missing.length) return { error: `Missing ${missing.join(', ')} in fields.` };
-  if (set === '210' && isNaN(Number(fields.amount))) return { error: 'amount must be a number.' };
-
-  const tx = makeTransaction({ env, dir: 'out', partner, set, control: nextControl(db), ref: ref || REF[set](fields), status: 'awaiting997', fields });
-  const errors = validate(parseX12(tx.raw), guidelineFor(db, partner, set, 'out'));
-  if (errors.length) {
-    db.lastControl -= 1; // nothing was sent, so give the number back
-    return { error: `This ${set} doesn’t pass the ${partner.name} guideline: ${errors.map((e) => e.text).join(' ')}` };
+  if (!fields || typeof fields !== 'object') return { error: 'fields must be an object with the TMS data for the file.' };
+  // A linked mapping says which values it needs; the built-in layouts need these.
+  if (!outboundMapping(db, partner, set)) {
+    const missing = REQUIRED[set].filter((k) => fields[k] === undefined || fields[k] === '');
+    if (missing.length) return { error: `Missing ${missing.join(', ')} in fields.` };
+    if (set === '210' && isNaN(Number(fields.amount))) return { error: 'amount must be a number.' };
   }
-  tx.events = [{ at: now(), text: 'Built from TMS data (API)' }, { at: now(), text: `Placed in ${partner.id}/outbound for the partner to pick up` }];
+
+  const result = buildOutbound(db, partner, { env, set, control: nextControl(db), ref: ref || REF[set](fields), status: 'awaiting997', fields });
+  if (result.error) {
+    db.lastControl -= 1; // nothing was sent, so give the number back
+    return result;
+  }
+  const { tx, mapping } = result;
+  tx.events = [{ at: now(), text: `${builtFrom(mapping)} (API)` }, { at: now(), text: `Placed in ${partner.id}/outbound for the partner to pick up` }];
   db.transactions.unshift(tx);
   return { tx, partner };
 }
@@ -164,22 +193,41 @@ export function resolve(db, i) {
   return db.transactions[i];
 }
 
+// Sends an outbound file again under the same control number. Files built from TMS data are
+// rebuilt with the partner's current mapping, so a fixed mapping fixes the resent file.
+// Returns the transaction, or { error }.
 export function resend(db, i) {
   const t = db.transactions[i];
-  db.transactions[i] = { ...t, status: 'awaiting997', ack: 'Pending', sentAt: now(), events: [...t.events, { at: now(), text: 'Sent again' }] };
+  let raw = t.raw;
+  let text = 'Sent again';
+  if (t.dir === 'out' && t.set !== '997' && t.fields) {
+    const partner = db.partners.find((p) => p.id === t.partnerId);
+    const result = buildOutbound(db, partner, t);
+    if (result.error) return result;
+    raw = result.tx.raw;
+    text = `Rebuilt and sent again (${result.mapping ? `mapping “${result.mapping.name}” v${result.mapping.version}` : 'built-in layout'})`;
+  }
+  db.transactions[i] = { ...t, raw, status: 'awaiting997', ack: 'Pending', sentAt: now(), events: [...t.events, { at: now(), text }] };
   return db.transactions[i];
 }
 
 const TEST_FIELDS = {
-  '990': { shipmentId: 'TEST', action: 'A' },
-  '214': { shipmentId: 'TEST', status: 'X3', city: 'Akron', state: 'OH' },
-  '210': { invoice: 'TEST', shipmentId: 'TEST', amount: 100 },
+  '990': { shipmentId: 'TEST', action: 'A', po: 'TEST-PO' },
+  '214': { shipmentId: 'TEST', status: 'X3', city: 'Akron', state: 'OH', po: 'TEST-PO' },
+  '210': { invoice: 'TEST', shipmentId: 'TEST', amount: 100, po: 'TEST-PO' },
 };
 
+// Sends a test file for the partner's first outbound 990, 214 or 210.
+// Returns { tx }, { error }, or null when there's nothing to test with.
 export function sendTest(db, partner) {
   const out = partner.sets.find((s) => s.dir === 'out' && TEST_FIELDS[s.set]);
   if (!out) return null;
-  const tx = makeTransaction({ env: 'test', dir: 'out', partner, set: out.set, control: nextControl(db), ref: `Test ${out.set}`, status: 'awaiting997', fields: TEST_FIELDS[out.set] });
-  db.transactions.unshift(tx);
-  return tx;
+  const result = buildOutbound(db, partner, { env: 'test', set: out.set, control: nextControl(db), ref: `Test ${out.set}`, status: 'awaiting997', fields: TEST_FIELDS[out.set] });
+  if (result.error) {
+    db.lastControl -= 1;
+    return result;
+  }
+  result.tx.events[0] = { at: now(), text: builtFrom(result.mapping) };
+  db.transactions.unshift(result.tx);
+  return result;
 }

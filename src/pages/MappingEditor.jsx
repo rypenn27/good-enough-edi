@@ -2,18 +2,25 @@ import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useStore } from '../store.jsx';
 import { PageHeader, Pill } from '../components/ui.jsx';
-import { SEGMENT_NAMES, TRANSFORMS, describeSource, elementLabel, parseX12, runMapping } from '../lib/x12.js';
+import { SEGMENT_NAMES, TRANSFORMS, describeSource, elementLabel, mappingDirection, parseX12, runMapping } from '../lib/x12.js';
+import OutboundMappingEditor from './OutboundMappingEditor.jsx';
 
+// Opens the right editor for the mapping's direction. Keyed by id so moving between
+// mappings starts each editor fresh.
 export default function MappingEditor() {
   const { id } = useParams();
-  const { state, dispatch, notify } = useStore();
+  const { state } = useStore();
   const mapping = state.mappings.find((m) => m.id === id);
-  const samples = state.transactions.filter((t) => t.partnerId === mapping?.partnerId && t.set === mapping?.set && t.dir === 'in');
-  const [sampleId, setSampleId] = useState(mapping?.sampleTxId || samples[0]?.id);
+  if (!mapping) return <p>That mapping doesn’t exist. <Link to="/mappings">Back to mappings</Link></p>;
+  return mappingDirection(mapping) === 'out' ? <OutboundMappingEditor key={id} mapping={mapping} /> : <InboundMappingEditor key={id} mapping={mapping} />;
+}
+
+function InboundMappingEditor({ mapping }) {
+  const { state, dispatch, notify } = useStore();
+  const samples = state.transactions.filter((t) => t.partnerId === mapping.partnerId && t.set === mapping.set && t.dir === 'in');
+  const [sampleId, setSampleId] = useState(mapping.sampleTxId || samples[0]?.id);
   const sample = state.transactions.find((t) => t.id === sampleId) || samples[0];
   const segments = useMemo(() => (sample ? parseX12(sample.raw) : []), [sample]);
-
-  if (!mapping) return <p>That mapping doesn’t exist. <Link to="/mappings">Back to mappings</Link></p>;
 
   const partner = state.partners.find((p) => p.id === mapping.partnerId);
   const ctx = { partnerName: (isaId) => state.partners.find((p) => p.isaId === isaId || p.testIsaId === isaId)?.name };

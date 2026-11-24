@@ -1,5 +1,5 @@
 // Sample data so the app opens in a realistic working state. All companies are fictional.
-import { buildX12 } from '../lib/x12.js';
+import { buildX12, stampFields } from '../lib/x12.js';
 
 export const OUR_IDS = { qualifier: 'ZZ', id: 'GOODENOUGH', testId: 'GOODENOUGHT', as2Id: 'GOODENOUGH-AS2' };
 
@@ -11,7 +11,7 @@ export const partners = [
     sets: [
       { set: '204', dir: 'in', guideline: 'atlas-204', mapping: 'atlas-204-load', stage: 'Live', ack: true },
       { set: '990', dir: 'out', guideline: 'std-990', mapping: null, stage: 'Live', ack: true },
-      { set: '214', dir: 'out', guideline: 'std-214', mapping: null, stage: 'Testing', ack: true },
+      { set: '214', dir: 'out', guideline: 'std-214', mapping: 'atlas-214-out', stage: 'Testing', ack: true },
       { set: '210', dir: 'out', guideline: 'std-210', mapping: null, stage: 'Not started', ack: true },
     ],
     contacts: [
@@ -34,7 +34,7 @@ export const partners = [
     connection: { type: 'sftp-remote', host: 'edi.northlinefoods.example', username: 'goodenough', auth: 'SSH key', allowedIps: [], inbound: '/to_carrier', outbound: '/from_carrier', healthy: true },
     sets: [
       { set: '204', dir: 'in', guideline: 'northline-204', mapping: 'northline-204-load', stage: 'Live', ack: true },
-      { set: '990', dir: 'out', guideline: 'std-990', mapping: null, stage: 'Live', ack: true },
+      { set: '990', dir: 'out', guideline: 'std-990', mapping: 'northline-990-out', stage: 'Live', ack: true },
       { set: '214', dir: 'out', guideline: 'std-214', mapping: null, stage: 'Live', ack: true },
     ],
     contacts: [{ name: 'Dana Ruiz', title: 'Logistics IT', email: 'edi-support@northlinefoods.example', phone: '(312) 555-0110' }],
@@ -52,7 +52,7 @@ export const partners = [
     connection: { type: 'as2', host: 'https://as2.bluewaterretail.example/receive', username: 'BLUEWATER-AS2', auth: 'Certificate · expires Mar 2027', allowedIps: ['198.51.100.24'], inbound: '', outbound: '', healthy: true },
     sets: [
       { set: '214', dir: 'out', guideline: 'std-214', mapping: null, stage: 'Live', ack: true },
-      { set: '210', dir: 'out', guideline: 'std-210', mapping: null, stage: 'Live', ack: true },
+      { set: '210', dir: 'out', guideline: 'std-210', mapping: 'bluewater-210-out', stage: 'Live', ack: true },
     ],
     contacts: [{ name: 'Tom Okoro', title: 'Supply chain systems', email: 'b2b@bluewaterretail.example', phone: '(216) 555-0193' }],
     checklist: [
@@ -131,9 +131,87 @@ const RULES_204 = [
 
 const withIds = (rules, prefix) => rules.map((r, i) => ({ id: `${prefix}-${i + 1}`, occurrence: 1, whereEl: '', whereEq: '', ...r }));
 
+// Outbound mapping building blocks: seg('B1', fixed('GEBK'), field('shipmentId', 'copy', true)).
+const fixed = (value) => ({ kind: 'fixed', value, path: '', fn: 'copy', required: false });
+const field = (path, fn = 'copy', required = false) => ({ kind: 'field', value: '', path, fn, required });
+const seg = (id, ...elements) => ({ seg: id, optional: false, elements });
+const optionalSeg = (id, ...elements) => ({ ...seg(id, ...elements), optional: true });
+const blank = fixed('');
+
+// Gives every segment and element an id so the editor can keep track of them.
+export function withSegmentIds(segments, prefix) {
+  return segments.map((s, i) => ({ ...s, id: `${prefix}-s${i + 1}`, elements: s.elements.map((el, j) => ({ ...el, id: `${prefix}-s${i + 1}-e${j + 1}` })) }));
+}
+
+// Starting points for a new outbound mapping: the same layout the built-in templates send.
+export const STARTER_LAYOUTS = {
+  '990': [seg('B1', fixed('GEBK'), field('shipmentId', 'copy', true), field('date', 'date', true), field('action', 'upper', true))],
+  '214': [
+    seg('B10', field('shipmentId', 'copy', true), field('shipmentId'), fixed('GEBK')),
+    seg('LX', fixed('1')),
+    seg('AT7', field('status', 'upper', true), fixed('NS'), blank, blank, field('date', 'date', true), field('time', 'time')),
+    seg('MS1', field('city'), field('state', 'upper')),
+  ],
+  '210': [seg('B3', blank, field('invoice', 'copy', true), field('shipmentId', 'copy', true), fixed('PP'), blank, field('date', 'date', true), field('amount', 'cents', true))],
+  '204': [
+    seg('B2', blank, fixed('GEBK'), blank, field('shipmentId', 'copy', true), blank, fixed('PP')),
+    seg('B2A', fixed('00')),
+    seg('L11', field('po'), fixed('PO')),
+    seg('S5', fixed('1'), fixed('LD')),
+    seg('G62', fixed('10'), field('pickup.date', 'date')),
+    seg('N1', fixed('SH'), field('pickup.name')),
+    seg('N3', field('pickup.street')),
+    seg('N4', field('pickup.city'), field('pickup.state', 'upper'), field('pickup.zip')),
+    seg('S5', fixed('2'), fixed('UL')),
+    seg('G62', fixed('70'), field('delivery.date', 'date')),
+    seg('N1', fixed('CN'), field('delivery.name')),
+    seg('N3', field('delivery.street')),
+    seg('N4', field('delivery.city'), field('delivery.state', 'upper'), field('delivery.zip')),
+    seg('L3', field('weight'), fixed('G'), blank, blank, field('rate')),
+  ],
+};
+
+// Sample TMS JSON per set, for trying a mapping in the editor.
+export const SAMPLE_TMS_FIELDS = {
+  '990': { shipmentId: '30117', action: 'A', po: 'NF-55120' },
+  '214': { shipmentId: '30116', status: 'X1', city: 'Akron', state: 'OH', po: 'PO-88213' },
+  '210': { invoice: 'INV-30091', shipmentId: '30091', amount: 1640.5, po: 'BW-2210' },
+  '204': {
+    shipmentId: '30101', po: 'PO-88190', weight: 39500, rate: 1450,
+    pickup: { name: 'Atlas Cold Chain DC 4', street: '1200 Freezer Way', city: 'Columbus', state: 'OH', zip: '43215', date: '2026-12-01' },
+    delivery: { name: 'Harbor Market #12', street: '88 Lakeshore Blvd', city: 'Akron', state: 'OH', zip: '44308', date: '2026-12-02' },
+  },
+};
+
+// Northline wants their PO number back on every 990. Atlas reads a 214 by its own
+// references: our shipment ID as a bill of lading and their PO, with city names in capitals.
+// Bluewater matches invoices to loads by an L11 bill of lading reference.
+const OUTBOUND = [
+  {
+    id: 'northline-990-out', name: 'Load response → Northline 990', partnerId: 'northline', set: '990', version: 1, status: 'Live',
+    segments: [...STARTER_LAYOUTS['990'], optionalSeg('L11', field('po'), fixed('PO'))],
+  },
+  {
+    id: 'atlas-214-out', name: 'Status update → Atlas 214', partnerId: 'atlas', set: '214', version: 2, status: 'Live',
+    segments: [
+      seg('B10', field('shipmentId', 'copy', true), blank, fixed('GEBK')),
+      seg('L11', field('shipmentId', 'copy', true), fixed('BM')),
+      optionalSeg('L11', field('po'), fixed('PO')),
+      seg('LX', fixed('1')),
+      seg('AT7', field('status', 'upper', true), fixed('NS'), blank, blank, field('date', 'date', true), field('time', 'time')),
+      seg('MS1', field('city', 'upper', true), field('state', 'upper', true)),
+    ],
+  },
+  {
+    id: 'bluewater-210-out', name: 'Invoice → Bluewater 210', partnerId: 'bluewater', set: '210', version: 1, status: 'Live',
+    segments: [...STARTER_LAYOUTS['210'], seg('L11', field('shipmentId', 'copy', true), fixed('BM'))],
+  },
+];
+
 export const mappings = [
-  { id: 'atlas-204-load', name: 'Atlas 204 → Load', partnerId: 'atlas', set: '204', version: 3, status: 'Draft', sampleTxId: 'tx-377', rules: withIds(RULES_204, 'a') },
-  { id: 'northline-204-load', name: 'Northline 204 → Load', partnerId: 'northline', set: '204', version: 1, status: 'Live', sampleTxId: 'tx-4812', rules: withIds(RULES_204, 'n') },
+  { id: 'atlas-204-load', name: 'Atlas 204 → Load', direction: 'in', partnerId: 'atlas', set: '204', version: 3, status: 'Draft', sampleTxId: 'tx-377', rules: withIds(RULES_204, 'a') },
+  { id: 'northline-204-load', name: 'Northline 204 → Load', direction: 'in', partnerId: 'northline', set: '204', version: 1, status: 'Live', sampleTxId: 'tx-4812', rules: withIds(RULES_204, 'n') },
+  ...OUTBOUND.map((m) => ({ ...m, direction: 'out', sample: SAMPLE_TMS_FIELDS[m.set], segments: withSegmentIds(m.segments, m.id) })),
 ];
 
 // ---- Transactions ----
@@ -179,16 +257,17 @@ const SPECS = [
 
 const ACK_FOR = { delivered: 'Sent', awaiting997: 'Pending', acknowledged: 'Accepted', rejected: 'Rejected', failed: 'Rejected', sent: 'Pending', resolved: 'Rejected' };
 
-export function makeTransaction({ minutesAgo = 0, env, dir, partner, set, control, ref, status, fields }) {
-  const date = new Date(Date.now() - minutesAgo * 60000);
+// `body` is the file's body segments from an outbound mapping; without it the set's
+// built-in layout is used.
+export function makeTransaction({ minutesAgo = 0, date = new Date(Date.now() - minutesAgo * 60000), env, dir, partner, set, control, ref, status, fields, body }) {
   const ours = env === 'test' ? OUR_IDS.testId : OUR_IDS.id;
   const theirs = env === 'test' ? partner.testIsaId : partner.isaId;
-  const extra = set === '990' ? { date: ymd(date) } : set === '214' ? { date: ymd(date), time: '0000' } : set === '210' ? { date: ymd(date) } : {};
   const raw = buildX12({
     set, control, date, usage: env === 'test' ? 'T' : 'P',
     senderId: dir === 'in' ? theirs : ours,
     receiverId: dir === 'in' ? ours : theirs,
-    fields: { ...fields, ...extra },
+    fields: stampFields(set, fields, date),
+    body,
   });
   const via = partner.connection.type === 'as2' ? 'AS2' : 'SFTP';
   const t = (sec) => new Date(date.getTime() + sec * 1000).toISOString();
