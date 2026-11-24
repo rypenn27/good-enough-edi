@@ -81,8 +81,9 @@ export function scan(db, log = console.log) {
         continue;
       }
       if (result.ack) deliver(result.partner, result.ack);
-      const { tx } = result;
-      log(`${tx.errors.length ? '✗' : '✓'} ${partner.id}/${name}: ${tx.set} ${tx.control}${tx.errors.length ? `, ${tx.errors.length} problems` : ''}${result.ack ? `, 997 ${result.ack.control} written` : ''}${result.acked ? `, acknowledges ${result.acked.set} ${result.acked.control}` : ''}`);
+      const failed = result.txs.filter((t) => t.errors.length).length;
+      const sets = result.txs.map((t) => t.set).join(', ');
+      log(`${failed ? '✗' : '✓'} ${partner.id}/${name}: ${result.txs.length} set${result.txs.length > 1 ? 's' : ''} (${sets}) in ${result.tx.control}${failed ? `, ${failed} failed` : ''}${result.ack ? `, 997 ${result.ack.control} written` : ''}${result.acked.length ? `, acknowledges ${result.acked.map((a) => `${a.out.set} ${a.out.control}`).join(', ')}` : ''}`);
     }
   }
   return handled;
