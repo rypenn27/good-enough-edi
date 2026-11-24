@@ -31,13 +31,19 @@ export function check(db, tx) {
   return { ...tx, errors, status: 'failed', ack: 'Rejected', events };
 }
 
+// Who a webhook is about: the partner's id here plus their ISA IDs (we always use the ZZ
+// qualifier), so the TMS can match the partner to its own customer by ISA ID.
+export function partnerInfo(db, partnerId) {
+  const p = db.partners.find((x) => x.id === partnerId);
+  return { id: partnerId, name: p?.name, isaQualifier: p?.isaQualifier || 'ZZ', isaId: p?.isaId, testIsaId: p?.testIsaId };
+}
+
 // The JSON a TMS receives for an inbound transaction: the partner's mapping output when
 // there is one, otherwise just the basics.
 export function tmsPayload(db, tx) {
-  const partner = db.partners.find((p) => p.id === tx.partnerId);
   const mapping = db.mappings.find((m) => m.partnerId === tx.partnerId && m.set === tx.set && mappingDirection(m) === 'in');
   const ctx = { partnerName: (isaId) => db.partners.find((p) => p.isaId === isaId || p.testIsaId === isaId)?.name };
-  const base = { transactionId: tx.id, partner: { id: partner?.id, name: partner?.name }, set: tx.set, control: tx.control, env: tx.env };
+  const base = { transactionId: tx.id, partner: partnerInfo(db, tx.partnerId), set: tx.set, control: tx.control, env: tx.env };
   if (tx.errors.length) return { ...base, errors: tx.errors.map((e) => e.text) };
   if (mapping) return { ...base, mapping: `${mapping.name} v${mapping.version}`, data: runMapping(txSegments(tx), mapping.rules, ctx).output };
   return { ...base, data: tx.fields };

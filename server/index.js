@@ -3,7 +3,7 @@
 import express from 'express';
 import { loadDb, saveDb, seedDb } from './db.js';
 import { INBOX, deliver, ensureFolders, scan, syncControl } from './inbox.js';
-import { findTx, processInbound, reprocess, resend, resolve, sendOutbound, sendTest, tmsPayload } from './process.js';
+import { findTx, partnerInfo, processInbound, reprocess, resend, resolve, sendOutbound, sendTest, tmsPayload } from './process.js';
 import { createWebhooks } from './webhooks.js';
 import { mockTmsRouter } from './mockTms.js';
 
@@ -24,8 +24,8 @@ function afterInbound(result) {
     if (tx.errors.length) fire('transaction.failed', tmsPayload(db, tx), null);
     else if (tx.set === '997') {
       const matched = result.acked.filter((a) => a.by === tx.id).map((a) => a.out);
-      if (!matched.length) fire('ack.received', { transactionId: null, status: 'unmatched', partner: tx.partnerId }, null);
-      matched.forEach((out) => fire('ack.received', { transactionId: out.id, set: out.set, control: out.control, ref: out.ref, status: out.status, partner: tx.partnerId }, null));
+      if (!matched.length) fire('ack.received', { transactionId: null, status: 'unmatched', partner: partnerInfo(db, tx.partnerId) }, null);
+      matched.forEach((out) => fire('ack.received', { transactionId: out.id, set: out.set, control: out.control, ref: out.ref, status: out.status, partner: partnerInfo(db, tx.partnerId) }, null));
     }
     if (tx.set === '997') {
       const i = findTx(db, tx.id);
@@ -36,7 +36,7 @@ function afterInbound(result) {
   }
 }
 
-const sentPayload = (tx) => ({ transactionId: tx.id, partner: tx.partnerId, set: tx.set, control: tx.control, ref: tx.ref, env: tx.env, fields: tx.fields });
+const sentPayload = (tx) => ({ transactionId: tx.id, partner: partnerInfo(db, tx.partnerId), set: tx.set, control: tx.control, ref: tx.ref, env: tx.env, fields: tx.fields });
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));

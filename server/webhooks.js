@@ -1,20 +1,32 @@
 // Sends events to the TMS webhooks set up on the API & webhooks page, with retries.
 // A new file only counts as delivered to the TMS once a webhook answers with a 2xx.
+// A webhook with a secret is signed: X-Good-Enough-Signature: sha256=<hex HMAC-SHA256 of the body>.
+import crypto from 'node:crypto';
+
 const RETRY_DELAYS_MS = [0, 5000, 30000]; // three tries: now, after 5s, after 30s more
 const TIMEOUT_MS = 10000;
 
 const now = () => new Date().toISOString();
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function post(url, body) {
+// The signature header value for a body, so the TMS can check the call came from us.
+export function sign(secret, body) {
+  return `sha256=${crypto.createHmac('sha256', secret).update(body).digest('hex')}`;
+}
+
+async function post(hook, body) {
+  // Signed over these exact bytes, so the same string is sent on every try.
+  const text = JSON.stringify(body);
+  const headers = { 'Content-Type': 'application/json', 'X-Good-Enough-Event': body.event };
+  if (hook.secret) headers['X-Good-Enough-Signature'] = sign(hook.secret, text);
   let lastError = '';
   for (const [i, delay] of RETRY_DELAYS_MS.entries()) {
     await wait(delay);
     try {
-      const res = await fetch(url, {
+      const res = await fetch(hook.url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Good-Enough-Event': body.event },
-        body: JSON.stringify(body),
+        headers,
+        body: text,
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
       if (res.ok) return { ok: true, tries: i + 1 };
@@ -53,7 +65,7 @@ export function createWebhooks({ getDb, save, log = console.log }) {
     const errors = [];
     const body = { event, sentAt: now(), data };
     for (const hook of hooks) {
-      post(hook.url, body).then((r) => {
+      post(hook, body).then((r) => {
         pending -= 1;
         log(`${r.ok ? '→' : '✗'} webhook ${event} to ${hook.url}${r.ok ? '' : `: ${r.error}`}`);
         if (r.ok) delivered = true;
