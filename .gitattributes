@@ -1,0 +1,2 @@
+# Sample X12 files are kept byte for byte (line endings matter in some of them).
+samples/*.edi -text
