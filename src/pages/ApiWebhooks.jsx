@@ -9,22 +9,33 @@ const EVENTS = {
   'ack.received': 'A partner’s 997 arrives',
 };
 
+// A random webhook signing secret, e.g. whsec_3f9a… (32 random bytes as hex).
+const makeSecret = () => 'whsec_' + Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, '0')).join('');
+
 export default function ApiWebhooks() {
   const { state, dispatch, notify } = useStore();
   const { apiKey, webhooks } = state.settings;
   const [show, setShow] = useState(false);
+  const [shownSecret, setShownSecret] = useState(null); // id of the webhook whose secret is visible
   const [url, setUrl] = useState('');
   const save = (patch) => dispatch({ type: 'updateSettings', patch });
   const setHooks = (fn) => save({ webhooks: fn(webhooks) });
 
-  const copy = async () => {
+  // Copies a key or secret; if the browser won't, shows it so it can be selected instead.
+  const copy = async (text, what, reveal) => {
     try {
-      await navigator.clipboard.writeText(apiKey);
-      notify('API key copied.');
+      await navigator.clipboard.writeText(text);
+      notify(`${what} copied.`);
     } catch {
-      setShow(true);
-      notify('Couldn’t copy. The key is shown so you can select it.', 'bad');
+      reveal();
+      notify(`Couldn’t copy. The ${what.toLowerCase()} is shown so you can select it.`, 'bad');
     }
+  };
+
+  const setSecret = (id, secret) => {
+    setHooks((hs) => hs.map((x) => (x.id === id ? { ...x, secret } : x)));
+    setShownSecret(secret ? id : null);
+    notify(secret ? 'New signing secret made. Put it in your TMS; the old one stops working.' : 'This webhook is no longer signed.');
   };
 
   const newKey = () => {
@@ -37,7 +48,9 @@ export default function ApiWebhooks() {
 
   const addHook = () => {
     if (!/^https?:\/\/\S+$/.test(url)) return notify('Enter a full URL starting with http:// or https://', 'bad');
-    setHooks((hs) => [...hs, { id: `wh-${Date.now()}`, url, events: ['transaction.received'], active: true }]);
+    const id = `wh-${Date.now()}`;
+    setHooks((hs) => [...hs, { id, url, events: ['transaction.received'], active: true, secret: makeSecret() }]);
+    setShownSecret(id);
     setUrl('');
   };
 
@@ -53,7 +66,7 @@ export default function ApiWebhooks() {
             {show ? apiKey : `${apiKey.slice(0, 8)}${'•'.repeat(16)}`}
           </code>
           <button type="button" className="btn" onClick={() => setShow(!show)}>{show ? 'Hide' : 'Show'}</button>
-          <button type="button" className="btn" onClick={copy}>Copy</button>
+          <button type="button" className="btn" onClick={() => copy(apiKey, 'API key', () => setShow(true))}>Copy</button>
           <button type="button" className="btn btn-danger" onClick={newKey}>Make a new key</button>
         </div>
       </section>
@@ -67,7 +80,10 @@ export default function ApiWebhooks() {
             <button type="button" className="btn" onClick={addHook}>Add webhook</button>
           </div>
         </div>
-        <div className="muted" style={{ padding: '0 16px 12px' }}>Good Enough EDI calls these addresses when something happens, so your TMS doesn’t have to keep checking.</div>
+        <div className="muted" style={{ padding: '0 16px 12px' }}>
+          Good Enough EDI calls these addresses when something happens, so your TMS doesn’t have to keep checking.
+          A webhook with a signing secret sends <code className="mono">X-Good-Enough-Signature: sha256=…</code>, an HMAC-SHA256 of the request body made with the secret, so your TMS can tell the call really came from here.
+        </div>
         {webhooks.map((h) => (
           <div key={h.id} className="alert-row" style={{ flexWrap: 'wrap' }}>
             <div style={{ flex: '1 1 300px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -79,6 +95,23 @@ export default function ApiWebhooks() {
                     {label}
                   </label>
                 ))}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                <span className="muted">Signing secret:</span>
+                {h.secret ? (
+                  <>
+                    <code className="mono" style={{ overflowWrap: 'anywhere' }}>{shownSecret === h.id ? h.secret : `${h.secret.slice(0, 6)}${'•'.repeat(16)}`}</code>
+                    <button type="button" className="btn btn-sm" onClick={() => setShownSecret(shownSecret === h.id ? null : h.id)}>{shownSecret === h.id ? 'Hide' : 'Show'}</button>
+                    <button type="button" className="btn btn-sm" onClick={() => copy(h.secret, 'Secret', () => setShownSecret(h.id))}>Copy</button>
+                    <button type="button" className="btn btn-sm" onClick={() => setSecret(h.id, makeSecret())}>Make a new secret</button>
+                    <button type="button" className="btn btn-sm btn-danger" onClick={() => setSecret(h.id, undefined)}>Stop signing</button>
+                  </>
+                ) : (
+                  <>
+                    <span>none, so calls aren’t signed</span>
+                    <button type="button" className="btn btn-sm" onClick={() => setSecret(h.id, makeSecret())}>Make a secret</button>
+                  </>
+                )}
               </div>
             </div>
             <div className="actions">

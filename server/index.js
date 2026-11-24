@@ -3,7 +3,7 @@
 import express from 'express';
 import { loadDb, saveDb, seedDb } from './db.js';
 import { INBOX, deliver, ensureFolders, scan, syncControl } from './inbox.js';
-import { findTx, processInbound, reprocess, resend, resolve, sendOutbound, sendTest, tmsPayload } from './process.js';
+import { findTx, partnerInfo, processInbound, reprocess, resend, resolve, sendOutbound, sendTest, tmsPayload } from './process.js';
 import { createWebhooks } from './webhooks.js';
 import { mockTmsRouter } from './mockTms.js';
 
@@ -16,21 +16,27 @@ if (syncControl(db)) saveDb(db);
 
 const fire = createWebhooks({ getDb: () => db, save: saveDb });
 
-// After an inbound file is read: tell the TMS about it, and about any file it acknowledges.
+// After an inbound file is read: tell the TMS about each transaction set in it, and about
+// any of our files a partner's 997 acknowledges.
 function afterInbound(result) {
   if (result.error) return;
-  const { tx, acked } = result;
-  if (tx.errors.length) fire('transaction.failed', tmsPayload(db, tx), null);
-  else if (tx.set === '997') fire('ack.received', { transactionId: acked?.id ?? null, set: acked?.set, control: acked?.control, ref: acked?.ref, status: acked?.status ?? 'unmatched', partner: tx.partnerId }, null);
-  if (tx.set === '997') {
-    const i = findTx(db, tx.id);
-    if (i >= 0 && db.transactions[i].status === 'delivering') db.transactions[i] = { ...db.transactions[i], status: 'delivered' };
-  } else if (!tx.errors.length) {
-    fire('transaction.received', tmsPayload(db, tx), tx.id);
+  for (const tx of result.txs) {
+    if (tx.errors.length) fire('transaction.failed', tmsPayload(db, tx), null);
+    else if (tx.set === '997') {
+      const matched = result.acked.filter((a) => a.by === tx.id).map((a) => a.out);
+      if (!matched.length) fire('ack.received', { transactionId: null, status: 'unmatched', partner: partnerInfo(db, tx.partnerId) }, null);
+      matched.forEach((out) => fire('ack.received', { transactionId: out.id, set: out.set, control: out.control, ref: out.ref, status: out.status, partner: partnerInfo(db, tx.partnerId) }, null));
+    }
+    if (tx.set === '997') {
+      const i = findTx(db, tx.id);
+      if (i >= 0 && db.transactions[i].status === 'delivering') db.transactions[i] = { ...db.transactions[i], status: 'delivered' };
+    } else if (!tx.errors.length) {
+      fire('transaction.received', tmsPayload(db, tx), tx.id);
+    }
   }
 }
 
-const sentPayload = (tx) => ({ transactionId: tx.id, partner: tx.partnerId, set: tx.set, control: tx.control, ref: tx.ref, env: tx.env, fields: tx.fields });
+const sentPayload = (tx) => ({ transactionId: tx.id, partner: partnerInfo(db, tx.partnerId), set: tx.set, control: tx.control, ref: tx.ref, env: tx.env, fields: tx.fields });
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));
@@ -60,7 +66,8 @@ app.post('/api/upload', (req, res) => {
   if (result.ack) deliver(result.partner, result.ack);
   afterInbound(result);
   saveDb(db);
-  res.json({ txId: result.tx.id, errors: result.tx.errors.length, version: db.version });
+  // errors counts the transaction sets that failed; count is how many sets the file held.
+  res.json({ txId: result.tx.id, txIds: result.txs.map((t) => t.id), count: result.txs.length, errors: result.txs.filter((t) => t.errors.length).length, version: db.version });
 });
 
 // The TMS sends 990s, 214s, 210s (and 204s to carriers) here, using the API key.

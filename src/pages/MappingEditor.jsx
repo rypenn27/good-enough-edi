@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useStore } from '../store.jsx';
 import { PageHeader, Pill } from '../components/ui.jsx';
-import { SEGMENT_NAMES, TRANSFORMS, describeSource, elementLabel, mappingDirection, parseX12, runMapping } from '../lib/x12.js';
+import { SEGMENT_NAMES, TRANSFORMS, describeSource, elementLabel, mappingDirection, runMapping, txSegments } from '../lib/x12.js';
 import OutboundMappingEditor from './OutboundMappingEditor.jsx';
 
 // Opens the right editor for the mapping's direction. Keyed by id so moving between
@@ -20,7 +20,7 @@ function InboundMappingEditor({ mapping }) {
   const samples = state.transactions.filter((t) => t.partnerId === mapping.partnerId && t.set === mapping.set && t.dir === 'in');
   const [sampleId, setSampleId] = useState(mapping.sampleTxId || samples[0]?.id);
   const sample = state.transactions.find((t) => t.id === sampleId) || samples[0];
-  const segments = useMemo(() => (sample ? parseX12(sample.raw) : []), [sample]);
+  const segments = useMemo(() => (sample ? txSegments(sample) : []), [sample]);
 
   const partner = state.partners.find((p) => p.id === mapping.partnerId);
   const ctx = { partnerName: (isaId) => state.partners.find((p) => p.isaId === isaId || p.testIsaId === isaId)?.name };

@@ -27,8 +27,8 @@ function summary(r) {
   if (r.event === 'transaction.received' && d.set === '204') return `Load ${d.data?.externalRef ?? '?'} from ${d.partner?.name}`;
   if (r.event === 'transaction.received') return `${d.set} ${d.control} from ${d.partner?.name}`;
   if (r.event === 'transaction.failed') return `${d.set} from ${d.partner?.name}: ${d.errors?.[0] ?? ''}`;
-  if (r.event === 'transaction.sent') return `${d.set} ${d.control} to ${d.partner}: ${d.ref}`;
-  if (r.event === 'ack.received') return d.transactionId ? `${d.set} ${d.control} ${d.status === 'acknowledged' ? 'accepted' : 'rejected'} by ${d.partner}` : `997 from ${d.partner} didn’t match a file`;
+  if (r.event === 'transaction.sent') return `${d.set} ${d.control} to ${d.partner?.name}: ${d.ref}`;
+  if (r.event === 'ack.received') return d.transactionId ? `${d.set} ${d.control} ${d.status === 'acknowledged' ? 'accepted' : 'rejected'} by ${d.partner?.name}` : `997 from ${d.partner?.name} didn’t match a file`;
   return '';
 }
 
