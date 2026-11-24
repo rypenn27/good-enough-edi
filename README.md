@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Then open http://localhost:5175. `npm run dev` starts both the web app (port 5175) and the API server (port 3002).
+Then open http://localhost:5175. `npm run dev` starts both the web app (port 5175) and the API server (port 3002). `npm test` checks the X12 reader against the sample files.
 
 ## Try the inbox
 
@@ -32,17 +32,56 @@ Copy a file from `samples/` into a partner's `inbound` folder. Within a few seco
 
 1. moves it to `archive`
 2. matches it to the partner by the sender ID in the ISA segment
-3. checks it against that partner's guideline and runs their mapping
-4. writes a 997 accepting or rejecting it to `outbound`
-5. shows it in the app, with a notice that a new file arrived
+3. splits it into its transaction sets and checks the envelope
+4. checks each set against that partner's guideline and runs their mapping
+5. writes one 997 interchange answering the whole file to `outbound`
+6. shows each set in the app as its own transaction, with a notice that a new file arrived
 
 | Sample | Drop it in | What happens |
 |---|---|---|
 | `northline-204-good.edi` | `edi-inbox/northline/inbound` | Accepted; 997 acceptance written |
 | `atlas-204-bad.edi` | `edi-inbox/atlas/inbound` | Fails validation (missing pickup date, 4-digit ZIP); 997 rejection written |
 | `wrong-folder-204.edi` | `edi-inbox/atlas/inbound` | Sent by Northline, so it's moved to `error` with an explanation |
+| `northline-204-pipes-crlf.edi` | `edi-inbox/northline/inbound` | Version 00501 with `\|` between elements, `^` after each segment and Windows (CRLF) line endings. Accepted like any other file |
+| `atlas-204-three-sets.edi` | `edi-inbox/atlas/inbound` | Three 204s in one group. The second has no pickup date, so you get three transactions (two delivered, one failed) and one 997 with `AK9*P*3*3*2` |
+| `northline-204-two-groups.edi` | `edi-inbox/northline/inbound` | Two groups (one 204, then two), a byte order mark and a line break as the segment terminator. Three transactions; the 997 holds one answer per group |
+| `northline-997-two-files.edi` | see below | A partner 997 acknowledging two of our 990s (groups 4813 and 4814) in one file |
 
-You can also paste or choose a file with **Upload a file** on the Transactions page.
+You can also paste or choose a file with **Upload a file** on the Transactions page. It goes through exactly the same steps.
+
+### How files are read
+
+**Any separators.** Partners pick their own separators and the ISA says which: the character right after `ISA` separates elements, ISA-16 is the component separator, and the character right after ISA-16 ends each segment. So `ISA|00|...|:^` means `|`, `:` and `^`. Line breaks or spaces after each segment terminator are ignored, as are a byte order mark and blank lines before the ISA, and a line break can itself be the terminator. For version 00501 and later, ISA-11 is the repetition separator. A file that doesn't start with a valid ISA is moved to `error` with an explanation. Files we build always use `*`, `~` and `>`. The transaction page shows which separators a file used.
+
+**Many transactions per file.** One file (an interchange) can hold several groups (GS to GE), each holding several transaction sets (ST to SE). Each set becomes its own transaction, with its own guideline check, mapping, webhook to the TMS and timeline, and remembers which file, interchange, group and set it came from. Its page shows just its own segments plus the envelope around them (ISA, its GS, GE and IEA), with line numbers as they are in the partner's file, so "line 24" means line 24 of what they sent. **Download file** gives back the whole file.
+
+**Envelope checks.** Every file is checked for matching control numbers (ISA-13 and IEA-02, GS-06 and GE-02, ST-02 and SE-02) and counts (IEA-01 groups, GE-01 sets, SE-01 segments from ST to SE), plus missing trailers. A problem shows up as a validation problem on the sets it affects: a bad SE on that set, a bad GE on every set in the group, a bad IEA on every set in the file. A file with no transaction sets at all can't be split, so it goes to `error`.
+
+### The 997 we send back
+
+Every file gets one 997 interchange in the partner's `outbound` folder, shown as one outbound 997 transaction. Inside it is one 997 per group received:
+
+| Segment | What it says |
+|---|---|
+| `AK1` | The group's functional code and control number (GS-01, GS-06) |
+| `AK2` / `AK5` | One pair per transaction set: its set ID and control number, then `A` accepted or `R` rejected (with a reason code) |
+| `AK3` / `AK4` | For a rejected set, the segment and element of each guideline problem we can point at, with the bad value |
+| `AK9` | `A` all accepted, `P` some accepted, `R` none accepted, then the number of sets included, received and accepted |
+
+Groups that are themselves 997s are never answered.
+
+### Partner 997s
+
+A partner's 997 is matched to our files by group control number: each file we send is its own group, whose number is the file's control number. One 997 file can answer several of our files (several groups, each with its own AK1), and a 997 can hold several AK2/AK5 pairs. If a partner sends only an AK9 for a group, with no AK2s, that answer applies to every file in the group.
+
+Our control numbers depend on what you've sent, so `northline-997-two-files.edi` only matches if your 990s happen to be 4813 and 4814. To make one that fits, send a couple of files (Test TMS, or the API below), then run:
+
+```
+node scripts/make-partner-997.js northline              # answers every file waiting on Northline's 997
+node scripts/make-partner-997.js northline 000004816 000004817 --reject
+```
+
+It writes the 997 straight into `edi-inbox/northline/inbound` (add `--stdout` to print it instead). Within a few seconds the files change to Acknowledged (or Rejected).
 
 ## Talking to a TMS
 
@@ -123,7 +162,7 @@ To set it up on another PC, install it (`winget install drakkan.SFTPGo`), create
 | Page | What it does |
 |---|---|
 | Transactions | Every file in and out, with filters, counts and file upload |
-| Transaction detail | Raw X12 with problem lines highlighted, a readable view, the JSON sent to the TMS, envelope IDs, timeline, and Reprocess / Mark resolved / Send again |
+| Transaction detail | Raw X12 with problem lines highlighted (just this set's lines when the file held several), a readable view, the JSON sent to the TMS, envelope IDs, timeline, and Reprocess / Mark resolved / Send again |
 | Trading partners | Partner list, add a partner, and each partner's IDs, connection, transaction sets (with the mapping each outbound set uses), onboarding checklist and contacts |
 | Connections | The local inbox folders, the planned SFTP server and AS2 station, and each partner's connection |
 | Mappings | Every mapping with its direction. Inbound mappings turn a partner's 204 into a TMS load, with live results against a sample file. Outbound mappings turn TMS data into each partner's 990, 214, 210 or 204, with a live X12 preview |
@@ -139,14 +178,16 @@ Production and Test are switched in the sidebar.
 
 - `server/index.js`: API routes and the inbox scan loop
 - `server/inbox.js`: partner folders, picking up files, writing outbound files
-- `server/process.js`: matching, checking, 997s (sent and received), outbound files (through the partner's outbound mapping when linked) and transaction actions
+- `server/process.js`: matching, splitting each file into one transaction per set, checking, 997s (one interchange answering each file; partner 997s matched to our files), outbound files (through the partner's outbound mapping when linked) and transaction actions
 - `server/webhooks.js`: sends events to the TMS webhooks, with retries
 - `server/mockTms.js`: the Test TMS's webhook receiver
 - `server/db.js`: reads and writes `data/db.json`, and adds new sample mappings to older databases
-- `src/lib/x12.js`: builds, reads and checks X12 files, and runs inbound and outbound mappings (used by both server and browser)
+- `src/lib/x12.js`: builds X12 files (997s included), reads them with whatever separators the ISA names, splits interchanges into groups and transaction sets with envelope checks, checks sets against guidelines, and runs inbound and outbound mappings (used by both server and browser)
 - `src/data/sample.js`: sample partners, guidelines, mappings (inbound and outbound), starter layouts for new outbound mappings, and files (all fictional)
 - `src/store.jsx`: loads data from the API, polls for changes, saves edits
 - `src/pages/`: one file per page (`OutboundMappingEditor.jsx` is opened from `MappingEditor.jsx` for outbound mappings)
+- `scripts/test-x12.js`: checks the reader, splitter and 997 builder against the samples (`npm test`)
+- `scripts/make-partner-997.js`: builds a partner 997 for files you've sent, for testing
 
 `data/` and `edi-inbox/` are created when the server first runs and aren't committed.
 
