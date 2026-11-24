@@ -59,6 +59,14 @@ function reducer(state, action) {
   }
 }
 
+// The notice for new inbox transactions: [text, tone].
+function inboxNotice(fresh) {
+  const files = new Set(fresh.map((t) => t.source?.batch || t.id)).size;
+  const bad = fresh.filter((t) => t.errors.length).length;
+  const sets = files === fresh.length ? '' : ` (${fresh.length} transactions)`;
+  return [`${files} new file${files > 1 ? 's' : ''} from the inbox${sets}${bad ? `, ${bad} failed validation` : ''}.`, bad ? 'bad' : 'ok'];
+}
+
 const StoreContext = createContext(null);
 
 export function StoreProvider({ children }) {
@@ -80,11 +88,9 @@ export function StoreProvider({ children }) {
     version.current = data.version;
     // Point out files that arrived through the inbox folders since the last look.
     if (seenIds.current) {
+      // One file can hold several transactions; those share a source.batch.
       const fresh = data.transactions.filter((t) => !seenIds.current.has(t.id) && t.via === 'Folder' && t.dir === 'in');
-      if (fresh.length) {
-        const bad = fresh.filter((t) => t.errors.length).length;
-        notify(`${fresh.length} new file${fresh.length > 1 ? 's' : ''} from the inbox${bad ? `, ${bad} failed validation` : ''}.`, bad ? 'bad' : 'ok');
-      }
+      if (fresh.length) notify(...inboxNotice(fresh));
     }
     seenIds.current = new Set(data.transactions.map((t) => t.id));
     baseDispatch({ type: 'load', data });

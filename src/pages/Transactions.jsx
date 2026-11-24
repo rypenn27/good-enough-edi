@@ -107,7 +107,7 @@ export default function Transactions() {
             const res = await actions.uploadFile(raw);
             if (res.error) return res.error;
             setUploading(false);
-            notify(res.errors ? `File received, but it failed validation (${res.errors} problems). A rejecting 997 was sent.` : 'File received and delivered to the TMS. A 997 was sent.', res.errors ? 'bad' : 'ok');
+            notify(uploadMessage(res), res.errors ? 'bad' : 'ok');
             navigate(`/transactions/${res.txId}`);
             return null;
           }}
@@ -115,6 +115,14 @@ export default function Transactions() {
       )}
     </>
   );
+}
+
+// What happened to an uploaded file. `count` is how many transaction sets it held and
+// `errors` how many of them failed.
+function uploadMessage({ count = 1, errors }) {
+  if (count === 1) return errors ? 'File received, but it failed validation. A rejecting 997 was sent.' : 'File received and delivered to the TMS. A 997 was sent.';
+  if (!errors) return `File received with ${count} transactions, all delivered to the TMS. A 997 was sent.`;
+  return `File received with ${count} transactions; ${errors} failed validation${errors < count ? ' and the rest went to the TMS' : ''}. A 997 was sent.`;
 }
 
 function UploadModal({ onClose, onSubmit }) {
